@@ -1,0 +1,5 @@
+# pyRevit and Python transient files
+__pycache__/
+*.pyc
+
+# Local reports are saved under Documents/BIM_QA_Reports, not in this repository.
