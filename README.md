@@ -6,7 +6,7 @@ A standalone, scan-only pyRevit extension for model-health and clash auditing.
 
 - Native Revit warnings, grouped and severity-ranked
 - Hard and clearance clash candidates with editable category-pair tolerances
-- JSON audit history, warning/clash trends, and health-score delta
+- A self-contained HTML dashboard that opens after each scan, plus JSON audit history, warning/clash trends, and Health Score delta
 - Clash states: New, Active, Resolved, and Approved
 - CSV and BCF 2.1 clash exports
 - Naming rules, required-parameter completeness, workset health, link-coordination review, possible duplicates, and performance flags
@@ -28,11 +28,11 @@ The audit is read-only: it creates reports but never adds, edits, or deletes Rev
 
 ## Reports and configuration
 
-The first scan creates this local folder:
+The first scan creates this local folder and opens the timestamped HTML dashboard in your default browser:
 
 `Documents/RevitScanner/reports`
 
-It also writes `audit_config.json` there. Edit that file to adjust hard-clash category pairs, clearance tolerances, ignore rules, naming regexes, required parameters, and Health Score weights.
+It also writes `audit_config.json` there. Edit that file to adjust hard-clash category pairs, clearance tolerances, ignore rules, naming regexes, required parameters, and Health Score weights. The HTML dashboard links to the JSON history, CSV clashes, and BCF package for that audit run.
 
 ## Important limitations
 

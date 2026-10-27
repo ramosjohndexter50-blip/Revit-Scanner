@@ -23,6 +23,7 @@ import uuid
 import zipfile
 from datetime import datetime
 import io
+from xml.sax.saxutils import escape as html_escape
 
 def makedirs_compat(path):
     if not os.path.isdir(path):
@@ -44,6 +45,7 @@ from Autodesk.Revit.DB import (
     ViewType, XYZ, BoundingBoxXYZ, WorksetKind, WorksetId,
     WorksetTable, WorksetVisibility, UnitUtils
 )
+from System.Diagnostics import Process
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -949,6 +951,67 @@ def export_bcf21(clashes, path, project_name):
             pass
 
 
+def report_file_link(path):
+    return "file:///" + path.replace("\\", "/").replace(" ", "%20")
+
+
+def html_table(headers, rows):
+    head = "".join("<th>{}</th>".format(html_escape(str(value))) for value in headers)
+    body = []
+    for row in rows:
+        body.append("<tr>{}</tr>".format("".join(
+            "<td>{}</td>".format(html_escape(str(value))) for value in row
+        )))
+    return "<table><thead><tr>{}</tr></thead><tbody>{}</tbody></table>".format(head, "".join(body))
+
+
+def export_html_dashboard(data, path):
+    """Write a self-contained local dashboard; no network or API is used."""
+    clashes = data.get("clashes", [])
+    trends = data.get("warning_trends", [])
+    hard = sum(1 for clash in clashes if clash.get("kind") == "Hard")
+    clearance = sum(1 for clash in clashes if clash.get("kind") == "Clearance")
+    trend_counts = {
+        "NEW": sum(1 for item in trends if item.get("trend") == "NEW"),
+        "RESOLVED": sum(1 for item in trends if item.get("trend") == "RESOLVED"),
+        "UNCHANGED": sum(1 for item in trends if item.get("trend") == "UNCHANGED")
+    }
+    discipline_rows = []
+    for name, row in sorted(data.get("breakdowns", {}).get("per_discipline", {}).items()):
+        discipline_rows.append((name, row.get("elements", 0), row.get("hard_clashes", 0), row.get("clearance_clashes", 0)))
+    level_rows = []
+    for name, row in sorted(data.get("breakdowns", {}).get("per_level", {}).items()):
+        level_rows.append((name, row.get("elements", 0), row.get("hard_clashes", 0), row.get("clearance_clashes", 0)))
+    fix_rows = []
+    for index, item in enumerate(data.get("fix_first", []), 1):
+        fix_rows.append((index, item.get("title", ""), item.get("count", 0), item.get("impact", 0), item.get("details", "")))
+    export_links = []
+    for label, export_path in sorted(data.get("exports", {}).items()):
+        export_links.append('<a class="export" href="{}">{}</a>'.format(report_file_link(export_path), html_escape(label)))
+    score = data.get("health_score", 0)
+    score_class = "good" if score >= 80 else ("warn" if score >= 60 else "bad")
+    html = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Revit Scanner Audit</title><style>
+body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1d2939}}.top{{background:#111c2b;color:white;padding:28px 42px}}.top h1{{margin:0;font-size:28px}}.top p{{margin:7px 0 0;color:#b9c6d8}}.wrap{{max-width:1420px;margin:24px auto;padding:0 24px}}.grid{{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:16px}}.card,section{{background:white;border:1px solid #e4eaf2;border-radius:12px;padding:20px;box-shadow:0 3px 12px #172b4d0d}}.metric{{font-size:32px;font-weight:700;margin-top:9px}}.label{{color:#667085;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}}.good{{color:#039855}}.warn{{color:#dc6803}}.bad{{color:#d92d20}}.two{{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}}h2{{font-size:18px;margin:0 0 14px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th{{text-align:left;background:#f8fafc;color:#475467}}td,th{{padding:10px;border-bottom:1px solid #eaecf0;vertical-align:top}}.export{{display:inline-block;margin:4px 8px 4px 0;padding:9px 12px;border-radius:7px;background:#e8f1ff;color:#175cd3;text-decoration:none;font-weight:600}}.note{{font-size:12px;color:#667085;margin-top:14px}}.footer{{color:#667085;padding:25px 0;font-size:12px}}@media(max-width:850px){{.grid,.two{{grid-template-columns:1fr}}}}</style></head>
+<body><header class="top"><h1>Revit Scanner</h1><p>Model Health &amp; Clash Audit &middot; {model} &middot; {timestamp}</p></header><main class="wrap">
+<div class="grid"><div class="card"><div class="label">Health Score</div><div class="metric {score_class}">{score}/100</div><div class="note">Delta: {delta:+}</div></div><div class="card"><div class="label">Hard Clashes</div><div class="metric bad">{hard}</div></div><div class="card"><div class="label">Clearance Candidates</div><div class="metric warn">{clearance}</div></div><div class="card"><div class="label">Revit Warning Groups</div><div class="metric">{warnings}</div></div></div>
+<div class="two"><section><h2>Warning Trends</h2>{trend_table}</section><section><h2>Report Files</h2>{exports}<p class="note">JSON keeps local audit history. CSV and BCF are available for coordination workflows.</p></section></div>
+<div class="two"><section><h2>Top 10 Fix First</h2>{fix_table}</section><section><h2>Clashes by Discipline</h2>{discipline_table}</section></div>
+<section style="margin-top:18px"><h2>Clashes by Level</h2>{level_table}<p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
+<div class="footer">Generated locally by Revit Scanner. No cloud service or AI API was used.</div></main></body></html>""".format(
+        model=html_escape(str(data.get("model_name", "Untitled"))), timestamp=html_escape(str(data.get("timestamp", ""))),
+        score=score, score_class=score_class, delta=data.get("health_score_delta", 0), hard=hard,
+        clearance=clearance, warnings=len(data.get("standards", {}).get("revit_warnings", [])),
+        trend_table=html_table(["New", "Resolved", "Unchanged"], [(trend_counts["NEW"], trend_counts["RESOLVED"], trend_counts["UNCHANGED"])]),
+        exports="".join(export_links),
+        fix_table=html_table(["#", "Recommendation", "Items", "Impact", "Details"], fix_rows),
+        discipline_table=html_table(["Discipline", "Elements", "Hard", "Clearance"], discipline_rows),
+        level_table=html_table(["Level", "Elements", "Hard", "Clearance"], level_rows)
+    )
+    with io.open(path, "w", encoding="utf-8") as html_file:
+        html_file.write(html)
+
+
 def print_report(data):
     print("## Model Health & Clash Audit")
     print("**Model:** {}  ".format(data["model_name"]))
@@ -1542,6 +1605,7 @@ def main():
     json_path = os.path.join(REPORT_DIR, base + ".json")
     csv_path = os.path.join(REPORT_DIR, base + "_clashes.csv")
     bcf_path = os.path.join(REPORT_DIR, base + "_clashes.bcf")
+    html_path = os.path.join(REPORT_DIR, base + ".html")
 
     try:
         elements = all_model_elements()
@@ -1598,15 +1662,20 @@ def main():
             "fix_first": fixes,
             "breakdowns": breakdowns,
             "config_path": CONFIG_PATH,
-            "exports": {"JSON": json_path, "CSV": csv_path, "BCF 2.1": bcf_path}
+            "exports": {"HTML dashboard": html_path, "JSON history": json_path, "CSV clashes": csv_path, "BCF 2.1": bcf_path}
         }
         with open_text_compat(json_path, "w") as f:
             json.dump(data, f, indent=2, ensure_ascii=True, default=str)
+        export_html_dashboard(data, html_path)
         print_report(data)
+        try:
+            Process.Start(html_path)
+        except Exception:
+            pass
         forms.alert(
-            "Audit complete.\n\nHealth Score: {}/100 (delta {:+})\nHard clashes: {}\nClearance clashes: {}\n\nReports saved in:\n{}".format(
+            "Audit complete.\n\nHealth Score: {}/100 (delta {:+})\nHard clashes: {}\nClearance clashes: {}\n\nHTML dashboard:\n{}\n\nReports saved in:\n{}".format(
                 score, delta, sum(1 for c in clashes if c["kind"] == "Hard"),
-                sum(1 for c in clashes if c["kind"] == "Clearance"), REPORT_DIR),
+                sum(1 for c in clashes if c["kind"] == "Clearance"), html_path, REPORT_DIR),
             title="BIM Audit Complete"
         )
     except Exception as ex:
