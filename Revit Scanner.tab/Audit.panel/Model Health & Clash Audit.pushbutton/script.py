@@ -696,9 +696,97 @@ def document_warnings():
     return sorted(grouped.values(), key=lambda item: (-item["count"], item["description"]))
 
 
+def model_health_inventory(elements):
+    """Collect practical project-health metrics without editing the model."""
+    result = {"issues": [], "links": [], "duplicate_marks": [], "unplaced_rooms": [], "unplaced_views": []}
+    path = getattr(doc, "PathName", "") or ""
+    result["model_path"] = path
+    result["workshared"] = bool(getattr(doc, "IsWorkshared", False))
+    try:
+        result["file_size_mb"] = round(os.path.getsize(path) / (1024.0 * 1024.0), 2) if path and os.path.exists(path) else None
+    except Exception:
+        result["file_size_mb"] = None
+
+    try:
+        links = FilteredElementCollector(doc).OfClass(RevitLinkInstance).ToElements()
+        for link in links:
+            try:
+                result["links"].append({"id": element_id_value(link.Id), "name": link.Name,
+                                        "loaded": link.GetLinkDocument() is not None})
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    mark_map = {}
+    for element in elements:
+        if not isinstance(element, FamilyInstance):
+            continue
+        try:
+            mark = element.LookupParameter("Mark")
+            value = mark.AsString() if mark else None
+            if value and value.strip():
+                key = (category_bic_name(element), value.strip())
+                mark_map.setdefault(key, []).append(element_id_value(element.Id))
+        except Exception:
+            pass
+    for key, ids in mark_map.items():
+        if len(ids) > 1:
+            result["duplicate_marks"].append({"category": key[0], "mark": key[1], "element_ids": ids})
+    if result["duplicate_marks"]:
+        result["issues"].append({"type": "duplicate_marks", "severity": "HIGH", "count": len(result["duplicate_marks"]),
+                                 "message": "{} duplicate Mark value group(s) need review.".format(len(result["duplicate_marks"]))})
+
+    try:
+        room_class = __import__("Autodesk.Revit.DB.Architecture", fromlist=["Room"]).Room
+        rooms = FilteredElementCollector(doc).OfClass(room_class).ToElements()
+        result["room_count"] = len(rooms)
+        for room in rooms:
+            if room.Location is None:
+                result["unplaced_rooms"].append(element_id_value(room.Id))
+        if result["unplaced_rooms"]:
+            result["issues"].append({"type": "unplaced_rooms", "severity": "MEDIUM", "count": len(result["unplaced_rooms"]),
+                                     "message": "{} room(s) are unplaced or not enclosed.".format(len(result["unplaced_rooms"]))})
+    except Exception:
+        result["room_count"] = 0
+
+    try:
+        view_class = __import__("Autodesk.Revit.DB", fromlist=["View"]).View
+        sheet_class = __import__("Autodesk.Revit.DB", fromlist=["ViewSheet"]).ViewSheet
+        placed = set()
+        for sheet in FilteredElementCollector(doc).OfClass(sheet_class).ToElements():
+            for view_id in sheet.GetAllPlacedViews():
+                placed.add(element_id_value(view_id))
+        for view in FilteredElementCollector(doc).OfClass(view_class).ToElements():
+            try:
+                if not view.IsTemplate and view.CanBePrinted and element_id_value(view.Id) not in placed:
+                    result["unplaced_views"].append({"id": element_id_value(view.Id), "name": view.Name})
+            except Exception:
+                pass
+        if result["unplaced_views"]:
+            result["issues"].append({"type": "unplaced_views", "severity": "LOW", "count": len(result["unplaced_views"]),
+                                     "message": "{} printable view(s) are not placed on sheets.".format(len(result["unplaced_views"]))})
+    except Exception:
+        pass
+
+    try:
+        import_class = __import__("Autodesk.Revit.DB", fromlist=["ImportInstance"]).ImportInstance
+        imports = FilteredElementCollector(doc).OfClass(import_class).ToElements()
+        result["imported_cad_count"] = len([item for item in imports if not getattr(item, "IsLinked", False)])
+        result["linked_cad_count"] = len([item for item in imports if getattr(item, "IsLinked", False)])
+        if result["imported_cad_count"]:
+            result["issues"].append({"type": "imported_cad", "severity": "MEDIUM", "count": result["imported_cad_count"],
+                                     "message": "{} imported CAD instance(s) found; review whether linking is more appropriate.".format(result["imported_cad_count"])})
+    except Exception:
+        result["imported_cad_count"] = 0
+        result["linked_cad_count"] = 0
+    return result
+
+
 def collect_standards(elements, config):
     return {
         "revit_warnings": document_warnings(),
+        "model_health": model_health_inventory(elements),
         "naming_issues": validate_naming(config),
         "required_parameters": required_parameter_check(elements, config),
         "workset_issues": workset_health(),
@@ -734,6 +822,10 @@ def flatten_warnings(clashes, standards):
             warnings.append({"key": "{}:{}:{}".format(group, issue.get("type"), issue.get("element_id", issue.get("element_a", issue.get("workset", issue.get("message", ""))))),
                              "kind": "warning", "severity": "Medium", "status": "Active",
                              "message": issue.get("message", str(issue))})
+    for issue in standards.get("model_health", {}).get("issues", []):
+        warnings.append({"key": "health:{}".format(issue.get("type")), "kind": "model_health",
+                         "severity": issue.get("severity", "MEDIUM"), "status": "Active",
+                         "message": issue.get("message", str(issue))})
     return warnings
 
 
@@ -784,6 +876,10 @@ def health_score(clashes, standards, config):
     penalty += len(standards.get("duplicates", [])) * weights.get("duplicate", 3)
     penalty += len([i for i in standards.get("link_and_view_issues", []) if i.get("type") == "link_positioning_review"]) * weights.get("link_coordination", 4)
     penalty += len([i for i in standards.get("performance_flags", []) if i.get("type") == "performance"]) * weights.get("performance_flag", 1)
+    for issue in standards.get("model_health", {}).get("issues", []):
+        severity = issue.get("severity", "LOW")
+        multiplier = 3 if severity == "HIGH" else (2 if severity == "MEDIUM" else 1)
+        penalty += issue.get("count", 1) * multiplier
     return max(0, min(100, 100 - penalty))
 
 
@@ -825,6 +921,10 @@ def fix_first(clashes, standards, config):
     if links:
         actions.append({"impact": links * weights.get("link_coordination", 4), "title": "Verify linked-model coordination",
                         "count": links, "details": "Confirm link positioning and shared coordinates with each discipline."})
+    for issue in standards.get("model_health", {}).get("issues", []):
+        impact = issue.get("count", 1) * (3 if issue.get("severity") == "HIGH" else 2)
+        actions.append({"impact": impact, "title": issue.get("message", "Review model health issue"),
+                        "count": issue.get("count", 1), "details": "Open the HTML dashboard for the affected-item inventory."})
     actions.sort(key=lambda x: x["impact"], reverse=True)
     return actions[:10]
 
@@ -990,6 +1090,17 @@ def export_html_dashboard(data, path):
         export_links.append('<a class="export" href="{}">{}</a>'.format(report_file_link(export_path), html_escape(label)))
     score = data.get("health_score", 0)
     score_class = "good" if score >= 80 else ("warn" if score >= 60 else "bad")
+    health = data.get("standards", {}).get("model_health", {})
+    loaded_links = len([item for item in health.get("links", []) if item.get("loaded")])
+    health_rows = [
+        ("Workshared", "Yes" if health.get("workshared") else "No"),
+        ("File size", "{} MB".format(health.get("file_size_mb")) if health.get("file_size_mb") is not None else "Unsaved / unavailable"),
+        ("Revit links loaded", "{} / {}".format(loaded_links, len(health.get("links", [])))),
+        ("Rooms / unplaced", "{} / {}".format(health.get("room_count", 0), len(health.get("unplaced_rooms", [])))),
+        ("Unplaced printable views", health.get("unplaced_views", []) and len(health.get("unplaced_views", [])) or 0),
+        ("Duplicate Mark groups", len(health.get("duplicate_marks", []))),
+        ("Imported CAD / linked CAD", "{} / {}".format(health.get("imported_cad_count", 0), health.get("linked_cad_count", 0)))
+    ]
     html = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Revit Scanner Audit</title><style>
 body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1d2939}}.top{{background:#111c2b;color:white;padding:28px 42px}}.top h1{{margin:0;font-size:28px}}.top p{{margin:7px 0 0;color:#b9c6d8}}.wrap{{max-width:1420px;margin:24px auto;padding:0 24px}}.grid{{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:16px}}.card,section{{background:white;border:1px solid #e4eaf2;border-radius:12px;padding:20px;box-shadow:0 3px 12px #172b4d0d}}.metric{{font-size:32px;font-weight:700;margin-top:9px}}.label{{color:#667085;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}}.good{{color:#039855}}.warn{{color:#dc6803}}.bad{{color:#d92d20}}.two{{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}}h2{{font-size:18px;margin:0 0 14px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th{{text-align:left;background:#f8fafc;color:#475467}}td,th{{padding:10px;border-bottom:1px solid #eaecf0;vertical-align:top}}.export{{display:inline-block;margin:4px 8px 4px 0;padding:9px 12px;border-radius:7px;background:#e8f1ff;color:#175cd3;text-decoration:none;font-weight:600}}.note{{font-size:12px;color:#667085;margin-top:14px}}.footer{{color:#667085;padding:25px 0;font-size:12px}}@media(max-width:850px){{.grid,.two{{grid-template-columns:1fr}}}}</style></head>
@@ -997,7 +1108,8 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
 <div class="grid"><div class="card"><div class="label">Health Score</div><div class="metric {score_class}">{score}/100</div><div class="note">Delta: {delta:+}</div></div><div class="card"><div class="label">Hard Clashes</div><div class="metric bad">{hard}</div></div><div class="card"><div class="label">Clearance Candidates</div><div class="metric warn">{clearance}</div></div><div class="card"><div class="label">Revit Warning Groups</div><div class="metric">{warnings}</div></div></div>
 <div class="two"><section><h2>Warning Trends</h2>{trend_table}</section><section><h2>Report Files</h2>{exports}<p class="note">JSON keeps local audit history. CSV and BCF are available for coordination workflows.</p></section></div>
 <div class="two"><section><h2>Top 10 Fix First</h2>{fix_table}</section><section><h2>Clashes by Discipline</h2>{discipline_table}</section></div>
-<section style="margin-top:18px"><h2>Clashes by Level</h2>{level_table}<p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
+<div class="two"><section><h2>Model Health Inventory</h2>{health_table}</section><section><h2>Clashes by Level</h2>{level_table}</section></div>
+<section style="margin-top:18px"><h2>Scan Notes</h2><p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
 <div class="footer">Generated locally by Revit Scanner. No cloud service or AI API was used.</div></main></body></html>""".format(
         model=html_escape(str(data.get("model_name", "Untitled"))), timestamp=html_escape(str(data.get("timestamp", ""))),
         score=score, score_class=score_class, delta=data.get("health_score_delta", 0), hard=hard,
@@ -1006,7 +1118,8 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
         exports="".join(export_links),
         fix_table=html_table(["#", "Recommendation", "Items", "Impact", "Details"], fix_rows),
         discipline_table=html_table(["Discipline", "Elements", "Hard", "Clearance"], discipline_rows),
-        level_table=html_table(["Level", "Elements", "Hard", "Clearance"], level_rows)
+        level_table=html_table(["Level", "Elements", "Hard", "Clearance"], level_rows),
+        health_table=html_table(["Metric", "Result"], health_rows)
     )
     with io.open(path, "w", encoding="utf-8") as html_file:
         html_file.write(html)
