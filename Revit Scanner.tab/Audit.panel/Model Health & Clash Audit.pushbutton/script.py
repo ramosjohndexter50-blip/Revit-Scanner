@@ -1785,12 +1785,7 @@ def main():
             Process.Start('explorer.exe', html_path)
         except Exception:
             pass
-        forms.alert(
-            "Audit complete.\n\nHealth Score: {}/100 (delta {:+})\nHard clashes: {}\nClearance clashes: {}\n\nHTML dashboard:\n{}\n\nReports saved in:\n{}".format(
-                score, delta, sum(1 for c in clashes if c["kind"] == "Hard"),
-                sum(1 for c in clashes if c["kind"] == "Clearance"), html_path, REPORT_DIR),
-            title="BIM Audit Complete"
-        )
+        forms.alert("Complete", title="Run Audit", warn_icon=False)
     except Exception as ex:
         error_path = os.path.join(REPORT_DIR, "audit_error_{}.txt".format(run_id))
         with open_text_compat(error_path, "w") as f:
