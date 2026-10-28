@@ -12,18 +12,31 @@ from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'lib'))
-from hamdan_scan import (PRESETS, ScanCancelled, ScanProgress, classify_pair, in_level_band,
+from hamdan_scan import (PRESETS, ScanCancelled, ScanProgress, in_level_band,
                          pair_rules, preset_config, scope_record)
 from test_issue_review import AUDIT, extract_functions
+from hamdan_clashes import ClashEngine
+from hamdan_audit import identity_key, clash_history
 
 
 class ScanModeTests(unittest.TestCase):
     def test_pair_supports_hard_and_clearance(self):
         config = {'hard_clash_categories': [['A', 'B']], 'clearance_tolerances_mm': {'B|A': 304.8}}
         rule = pair_rules(config)[0]
-        self.assertEqual('Hard', classify_pair([0, 0, 0, 2, 2, 2], [1, 1, 1, 3, 3, 3], rule)[0])
-        self.assertEqual('Clearance', classify_pair([0, 0, 0, 2, 2, 2], [2.5, 0, 0, 4, 2, 2], rule)[0])
-        self.assertIsNone(classify_pair([0, 0, 0, 2, 2, 2], [4, 0, 0, 6, 2, 2], rule)[0])
+        class Intersection:
+            Volume = 1
+            def Dispose(self): pass
+        DB = SimpleNamespace(BooleanOperationsUtils=SimpleNamespace(ExecuteBooleanOperation=lambda *args: Intersection()),
+                             BooleanOperationsType=SimpleNamespace(Intersect='Intersect'))
+        engine = ClashEngine(DB, None, {}, lambda *args: None, None, [])
+        engine.geometry = lambda *args: [object()]
+        def hit(box):
+            result = engine.classify(None, {'key': 'linked'}, [0, 0, 0, 2, 2, 2], None, {'key': 'linked'}, box, rule)
+            return result[0] if result else None
+        self.assertEqual('Hard', hit([1, 1, 1, 3, 3, 3]))
+        self.assertEqual('Clearance', hit([2.5, 0, 0, 4, 2, 2]))
+        self.assertIsNone(hit([4, 0, 0, 6, 2, 2]))
+        self.assertIsNone(hit([2.8, 2.8, 0, 4, 4, 2]))  # diagonal gap exceeds a one-foot tolerance
 
     def test_level_band_includes_crossing_elements(self):
         self.assertTrue(in_level_band([0, 0, -3, 2, 2, 11], [0, 10]))
@@ -48,8 +61,10 @@ class ScanModeTests(unittest.TestCase):
         saved_scope = scope_record('Quick Scan', {'a': 1})
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'audit_one.json'
-            path.write_text(__import__('json').dumps({'document_key': 'model', 'scan_scope': saved_scope}))
+            path.write_text(__import__('json').dumps({'document_key': 'model', 'scan_scope': saved_scope, 'schema_version': '3.0', 'audit_complete': True}))
             namespace['previous_audit_files'] = lambda: [str(path)]
+            self.assertIsNotNone(namespace['load_previous_audit']('model', saved_scope))
+            path.write_text(__import__('json').dumps({'document_key': 'model', 'scan_scope': saved_scope, 'schema_version': '3.1', 'audit_complete': True}))
             self.assertIsNotNone(namespace['load_previous_audit']('model', saved_scope))
             for scope in (scope_record('Full Audit', {'a': 1}), scope_record('Quick Scan', {'a': 2}),
                           scope_record('Quick Scan', {'a': 1}, level_id='L2')):
@@ -74,20 +89,28 @@ class ScanModeTests(unittest.TestCase):
     def run_mode(self, mode, cancel=False):
         calls = []
         data_out = []
+        def reject_history(*args):
+            raise AssertionError('Fresh scans must not load a previous report or issue register.')
         def tick(label=None, *args, **kwargs):
             if cancel and label == 'Preparing findings':
                 raise ScanCancelled()
         ns = {
             'doc': SimpleNamespace(Title='Model', PathName='test.rvt'),
+            'CHECK_RESULTS': {}, 'SCAN_DIAGNOSTICS': [], 'CLASH_COVERAGE': {},
+            'identity_key': identity_key, 'clash_history': clash_history,
+            'load_register': reject_history, 'overlay_clash_approvals': reject_history,
+            'overlay_issues': lambda *args: None,
             'scan_tick': tick, 'all_model_elements': lambda: calls.append('inventory') or [],
             'detect_clashes': lambda *args: calls.append('clashes') or [],
             'collect_standards': lambda *args: calls.append('health') or {},
             'now_iso': lambda: '2026-10-28T12:00:00', 'datetime': datetime, 'safe_name': str, 'os': os,
             'REPORT_DIR': 'reports', 'CONFIG_PATH': 'config.json',
-            'load_previous_audit': lambda *args: None, 'flatten_warnings': lambda *args: [],
+            'load_previous_audit': reject_history, 'flatten_warnings': lambda *args: [],
             'health_score': lambda *args: 100, 'compare_history': lambda *args: [],
             'fix_first': lambda *args: [], 'breakdown_tables': lambda *args: {},
             'model_identity': lambda *args: {}, 'Process': SimpleNamespace(GetCurrentProcess=lambda: SimpleNamespace(Id=1)),
+            'begin_scan': lambda *args: {'scan_run': 'fresh-run'},
+            'publish_scan': lambda *args: None,
             'attach_references': lambda *args: [], 'build_issues': lambda *args: [],
             'describe_review_element': lambda *args: None,
             'export_clashes_csv': lambda *args: calls.append('csv'),
@@ -105,7 +128,10 @@ class ScanModeTests(unittest.TestCase):
     def test_quick_scan_skips_clash_work_and_exports(self):
         calls, data = self.run_mode('Quick Scan')
         self.assertEqual(['inventory', 'health'], calls)
-        self.assertEqual({'HTML dashboard', 'JSON history'}, set(data[0]['exports']))
+        self.assertEqual({'HTML dashboard', 'JSON results'}, set(data[0]['exports']))
+        self.assertEqual('fresh', data[0]['history_mode'])
+        self.assertIsNone(data[0]['previous_health_score'])
+        self.assertEqual([], data[0]['warning_trends'])
 
     def test_clash_scan_skips_whole_model_health(self):
         calls, data = self.run_mode('Clash Scan')
@@ -163,14 +189,35 @@ class ScanModeTests(unittest.TestCase):
             def Dispose(self):
                 pass
 
-        ns = {'pair_rules': pair_rules, 'in_level_band': in_level_band, 'classify_pair': classify_pair,
-              'BuiltInCategory': SimpleNamespace(A='A', B='B'), 'doc': SimpleNamespace(Title='Model'),
-              'scan_tick': lambda *a, **k: None, 'FilteredElementCollector': Collector,
-              'get_bbox': lambda el: el.box, 'mm_to_internal': lambda value: value / 304.8,
-              'Outline': Outline, 'XYZ': lambda *p: p, 'BoundingBoxIntersectsFilter': lambda outline: outline,
-              'element_id_value': int, 'uuid': uuid, 'category_key': lambda el: el.category,
-              'element_is_ignored_pair': lambda a, b, config: compared.append(b.Id) or False,
-              'get_element_record': lambda el: {'id': el.Id}}
+        class Vector:
+            def __init__(self, x, y, z): self.X, self.Y, self.Z = x, y, z
+            def __iter__(self): return iter((self.X, self.Y, self.Z))
+        identity = SimpleNamespace(OfPoint=lambda p: p)
+        identity.Inverse = identity
+        document = SimpleNamespace(Title='Model')
+        class Engine(ClashEngine):
+            def sources(self):
+                return [{'document': document, 'key': 'host', 'root_link': None, 'transform': identity}]
+            def bbox(self, element, source): return element.box
+            def record(self, element, source, box): return {'id': element.Id}
+            def classify(self, a, sa, ba, b, sb, bb, rule):
+                compared.append(b.Id)
+                return super().classify(a, sa, ba, b, sb, bb, rule)
+            def geometry(self, *args): return [object()]
+        for item in all_elements:
+            item.UniqueId = str(item.Id)
+            class TestId(int):
+                @property
+                def Value(self): return int(self)
+            item.Id = TestId(item.Id)
+        DB = SimpleNamespace(BuiltInCategory=SimpleNamespace(A='A', B='B'), FilteredElementCollector=Collector,
+                             Outline=Outline, XYZ=Vector, BoundingBoxIntersectsFilter=lambda outline: outline,
+                             BooleanOperationsType=SimpleNamespace(Intersect='Intersect'),
+                             BooleanOperationsUtils=SimpleNamespace(ExecuteBooleanOperation=lambda *args:
+                                 SimpleNamespace(Volume=1, Dispose=lambda: None)))
+        ns = {'ClashEngine': Engine, 'DB': DB, 'doc': document, 'CLASH_COVERAGE': {}, 'CHECK_RESULTS': {},
+              'SCAN_DIAGNOSTICS': [], 'scan_tick': lambda *a, **k: None,
+              'element_is_ignored_pair': lambda *args: False}
         extract_functions(AUDIT, ('detect_clashes',), ns)
         findings = ns['detect_clashes']({'hard_clash_categories': [['A', 'B']]}, [0, 5])
         self.assertEqual(1, len(prefilters))

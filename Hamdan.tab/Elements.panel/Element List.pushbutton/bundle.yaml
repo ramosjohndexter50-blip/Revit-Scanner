@@ -1,3 +1,3 @@
 title: Element List
-tooltip: Keep this window open and click elements in Revit to collect a named list. Search family/type names and select or zoom to a listed element.
+tooltip: Collect named elements by clicking in Revit or Add All Model Elements. Select All Rows selects the list without selecting the model until Select & Zoom.
 author: Hamdan

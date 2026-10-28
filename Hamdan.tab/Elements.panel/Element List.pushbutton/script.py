@@ -58,7 +58,7 @@ class ElementWindow(forms.WPFWindow):
         records = []
         selected_ids = uidoc.Selection.GetElementIds()
         for index, element_id in enumerate(selected_ids):
-            if index >= self.state.limit:
+            if self.state.limit is not None and index >= self.state.limit:
                 break
             element = uidoc.Document.GetElement(element_id)
             if element is not None:
@@ -66,7 +66,7 @@ class ElementWindow(forms.WPFWindow):
                                                name_getter=lambda item: DB.Element.Name.GetValue(item)))
         skipped = self.state.upsert(records)
         self.render()
-        if skipped or len(selected_ids) > self.state.limit:
+        if skipped or (self.state.limit is not None and len(selected_ids) > self.state.limit):
             self.status_text.Text += ' List limit: {} elements; narrow the selection to collect more.'.format(self.state.limit)
 
     def render(self):
@@ -84,6 +84,58 @@ class ElementWindow(forms.WPFWindow):
         # The XAML loader can fire TextChanged before the other controls exist.
         if hasattr(self, 'element_list') and self.element_list is not None:
             self.render()
+
+    def add_all_clicked(self, sender, args):
+        self.status_text.Text = 'Reading all model elements...'
+        self.add_all_button.IsEnabled = False
+        events.execute_in_revit_context(self.add_all_model)
+
+    def add_all_model(self):
+        if self.closed:
+            return
+        collector = None
+        try:
+            uidoc = HOST_APP.uiapp.ActiveUIDocument
+            if uidoc is None or not self.same_document(uidoc.Document):
+                self.status_text.Text = 'Switch back to {} first.'.format(self.document_title)
+                return
+            collector = DB.FilteredElementCollector(uidoc.Document).WhereElementIsNotElementType()
+            total = collector.GetElementCount()
+            # Stage the new list so Cancel leaves the user's existing list intact.
+            staged = ElementListState()
+            staged.upsert(self.state.rows.values())
+            skipped = 0
+            with forms.ProgressBar(title='Hamdan - Reading model elements', cancellable=True) as bar:
+                for index, element in enumerate(collector):
+                    if index % 100 == 0:
+                        bar.update_progress(index, max(1, total))
+                        if bar.cancelled:
+                            self.status_text.Text = 'Cancelled. The previous list is unchanged.'
+                            return
+                    try:
+                        if element.Category is not None and element.Category.CategoryType == DB.CategoryType.Model and not element.ViewSpecific:
+                            staged.upsert([describe_element(uidoc.Document, element,
+                                name_getter=lambda item: DB.Element.Name.GetValue(item))])
+                    except Exception:
+                        skipped += 1
+                bar.update_progress(total, max(1, total))
+                if bar.cancelled:
+                    self.status_text.Text = 'Cancelled. The previous list is unchanged.'
+                    return
+            self.state = staged
+            self.render()
+            self.status_text.Text += ' | All host-model instances added; {} inaccessible. Linked contents are not included.'.format(skipped)
+        except Exception as error:
+            self.status_text.Text = 'Could not read all elements: {}'.format(error)
+        finally:
+            if collector is not None:
+                collector.Dispose()
+            self.add_all_button.IsEnabled = True
+
+    def select_all_clicked(self, sender, args):
+        # Select visible list rows only; no changes to Revit's selection until Select & Zoom.
+        self.element_list.SelectAll()
+        self.status_text.Text = '{} shown row(s) selected.'.format(len(self.element_list.SelectedItems))
 
     def locate_clicked(self, sender, args):
         rows = [row.record for row in self.element_list.SelectedItems]

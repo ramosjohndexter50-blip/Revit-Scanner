@@ -103,19 +103,3 @@ def in_level_band(box, band):
     low, high = band
     # Include elements crossing the level band, including vertical services.
     return box[5] >= low and (high is None or box[2] < high)
-
-
-def classify_pair(a, b, rule):
-    """Return a bounding-box finding; clearance applies even on hard-enabled pairs."""
-    overlap = max(0, min(a[3], b[3]) - max(a[0], b[0]))
-    overlap *= max(0, min(a[4], b[4]) - max(a[1], b[1]))
-    overlap *= max(0, min(a[5], b[5]) - max(a[2], b[2]))
-    if overlap > 1e-8:
-        return ('Hard', overlap) if rule['hard'] else (None, 0)
-    tolerance = rule.get('clearance_mm')
-    if tolerance is None:
-        return None, 0
-    gap = float(tolerance) / 304.8
-    if all(a[axis + 3] + gap >= b[axis] and b[axis + 3] + gap >= a[axis] for axis in range(3)):
-        return 'Clearance', 0
-    return None, 0

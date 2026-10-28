@@ -28,7 +28,7 @@ def build_issues(data):
         if status == 'Resolved':
             return
         ids = valid_ids(ids)
-        key = json.dumps([kind, source or message, ids], ensure_ascii=True)
+        key = json.dumps([kind, source or message, sorted(ids)], ensure_ascii=True)
         issues.append({
             'issue_id': hashlib.sha1(key.encode('utf-8')).hexdigest()[:12],
             'kind': kind, 'severity': severity.upper(), 'message': message,
@@ -41,10 +41,21 @@ def build_issues(data):
         add('Clash: ' + clash.get('kind', 'Candidate'),
             'HIGH' if clash.get('kind') == 'Hard' else 'MEDIUM',
             clash.get('message', 'Review clash candidate'), [a.get('id'), b.get('id')],
-            'Verify the intersection in Revit, then coordinate an adjustment or opening. '
-            'This finding uses bounding boxes and requires visual review.',
+            ('Positive-volume solid intersection; coordinate an adjustment or opening.'
+             if clash.get('evidence') == 'Solid intersection' else
+             'Bounding-box clearance candidate; verify the actual separation before changing geometry.') +
+            (' Linked components: select the host link and use the saved viewpoint/IDs to locate the component.'
+             if a.get('linked_unique_id') or b.get('linked_unique_id') else ''),
             clash.get('status', 'Active'), clash.get('clash_id', ''),
             [r.get('level', 'Not assigned') for r in (a, b)])
+        if issues and clash.get('status') != 'Resolved':
+            issues[-1]['source_clash_id'] = clash.get('clash_id', '')
+
+    for finding in data.get('document_findings', []):
+        source = '{}:{}:{}'.format(finding.get('type'), finding.get('view_id', ''), finding.get('sheet_id', ''))
+        add('Document: ' + finding.get('type', 'Review'), finding.get('severity', 'MEDIUM'),
+            finding.get('message', ''), finding.get('element_ids', []),
+            'Open the referenced view or sheet and verify the configured BEP requirement before editing.', source=source)
 
     standards = data.get('standards', {})
     for warning in standards.get('revit_warnings', []):
@@ -90,6 +101,9 @@ def build_issues(data):
     for room_id in health.get('unplaced_rooms', []):
         add('Unplaced room', 'MEDIUM', 'Room is not placed', [room_id],
             'Locate the room in a room schedule and place it on the intended level, or remove it after review.')
+    for room_id in health.get('unenclosed_rooms', []):
+        add('Room with zero area', 'MEDIUM', 'Placed room has zero area', [room_id],
+            'Review room boundaries, phase and redundant rooms on the intended level.')
     for finding in health.get('unplaced_views', []):
         add('View not on sheet', 'LOW', finding.get('name', 'Printable view not placed on a sheet'),
             [finding.get('id')], 'Place this view on the intended sheet or confirm that it is a working view.')

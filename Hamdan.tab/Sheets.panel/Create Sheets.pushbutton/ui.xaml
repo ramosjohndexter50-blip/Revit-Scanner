@@ -1,0 +1,37 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Hamdan - Create Sheets"
+        Width="780" Height="660" MinHeight="580" WindowStartupLocation="CenterScreen" Background="#F3F6FA">
+    <Window.Resources>
+        <Style TargetType="TextBox"><Setter Property="Margin" Value="0,4,12,8"/><Setter Property="Padding" Value="8,5"/></Style>
+        <Style TargetType="Button"><Setter Property="Padding" Value="18,8"/><Setter Property="Margin" Value="8,0,0,0"/></Style>
+    </Window.Resources>
+    <Grid Margin="22">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel><TextBlock Text="Create Sheets" FontSize="24" FontWeight="SemiBold" Foreground="#13253E"/>
+            <TextBlock Text="Choose a title block and review the numbers before creating." Margin="0,6,0,14"/></StackPanel>
+        <StackPanel Grid.Row="1"><TextBlock Text="Title block"/><ComboBox x:Name="titleblock_box" Margin="0,4,0,12" Padding="6"/></StackPanel>
+        <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+            <StackPanel><TextBlock Text="Sheet number format"/><TextBox x:Name="pattern_box" Text="{}{floor}{tower}-{n:02}" TextChanged="changed"/></StackPanel>
+            <StackPanel Grid.Column="1"><TextBlock Text="Sheet name format"/><TextBox x:Name="name_box" Text="General Arrangement {n:02}" TextChanged="changed"/></StackPanel>
+        </Grid>
+        <StackPanel Grid.Row="3">
+            <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <StackPanel><TextBlock Text="Count"/><TextBox x:Name="count_box" Text="1" TextChanged="changed"/></StackPanel>
+                <StackPanel Grid.Column="1"><TextBlock Text="Start"/><TextBox x:Name="start_box" Text="1" TextChanged="changed"/></StackPanel>
+                <StackPanel Grid.Column="2"><TextBlock Text="Increment"/><TextBox x:Name="step_box" Text="1" TextChanged="changed"/></StackPanel>
+                <StackPanel Grid.Column="3"><TextBlock Text="Floor code"/><TextBox x:Name="floor_box" Text="G" TextChanged="changed"/></StackPanel>
+                <StackPanel Grid.Column="4"><TextBlock Text="Tower code"/><TextBox x:Name="tower_box" Text="A" TextChanged="changed"/></StackPanel>
+            </Grid>
+            <TextBlock Text="Examples: GA-03 or 03-GA. Use {n:02}, {floor}, {tower} in either format." Margin="0,0,0,12" TextWrapping="Wrap" Foreground="#475569"/>
+        </StackPanel>
+        <ListView Grid.Row="4" x:Name="preview" Background="White"><ListView.View><GridView>
+            <GridViewColumn Header="Sheet number" Width="200" DisplayMemberBinding="{Binding Number}"/>
+            <GridViewColumn Header="Sheet name" Width="460" DisplayMemberBinding="{Binding Name}"/>
+        </GridView></ListView.View></ListView>
+        <StackPanel Grid.Row="5" Margin="0,14,0,0"><TextBlock x:Name="status_text" TextWrapping="Wrap" Margin="0,0,0,12"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Cancel" Click="cancel_clicked"/>
+                <Button x:Name="create_button" Content="Create" Click="create_clicked" Background="#175CD3" Foreground="White"/></StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>

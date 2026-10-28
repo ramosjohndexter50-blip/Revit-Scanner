@@ -8,6 +8,19 @@ except NameError:
     text_type = str
 
 
+def collect_rooms(DB, document):
+    """Room is not supported by OfClass; its native category excludes areas/spaces/tags.
+
+    Keep unplaced rooms and all phases: numbering conflicts and health checks need them.
+    """
+    collector = DB.FilteredElementCollector(document).OfCategory(
+        DB.BuiltInCategory.OST_Rooms).WhereElementIsNotElementType()
+    try:
+        return collector.ToElements()
+    finally:
+        collector.Dispose()
+
+
 def safe_name(element, name_getter=None):
     if element is None:
         return ''
@@ -61,7 +74,7 @@ def describe_element(document, element, name_getter=None, level_getter=None):
 
 
 class ElementListState(object):
-    def __init__(self, limit=2000):
+    def __init__(self, limit=None):
         self.rows = {}
         self.limit = limit
 
@@ -71,7 +84,7 @@ class ElementListState(object):
             key = record.get('unique_id')
             if not key:
                 continue
-            if key not in self.rows and len(self.rows) >= self.limit:
+            if key not in self.rows and self.limit is not None and len(self.rows) >= self.limit:
                 skipped += 1
                 continue
             self.rows[key] = dict(record)

@@ -7,8 +7,10 @@ from Autodesk.Revit.DB import ElementId, View
 from System.Collections.Generic import List
 from System.Diagnostics import Process
 
-from hamdan_issues import latest_model_report, model_identity
+from hamdan_session import current_report
 from hamdan_elements import describe_element
+from hamdan_tracking import load_register, overlay_issues
+from hamdan_issue_workflow import IssueEditor, issue_dashboard
 
 
 class IssueOption(forms.TemplateListItem):
@@ -18,7 +20,7 @@ class IssueOption(forms.TemplateListItem):
         ids = ', '.join(str(value) for value in row.get('element_ids', [])) or 'Project check'
         names = ' / '.join(ref.get('display_name') or ref.get('name', '') for ref in row.get('element_refs', []))
         return u'[{}] {} | {} | {} | {} | IDs: {}'.format(
-            row['severity'], row['kind'], row.get('level', 'Not assigned'), names, row['message'], ids)
+            row['severity'], row['kind'], row.get('workflow_status', row.get('status', 'Active')) + ' | ' + row.get('assignee', ''), names, row['message'], ids)
 
     @property
     def description(self):
@@ -79,14 +81,14 @@ def main():
         forms.alert('Open a Revit project to review its audit findings.', title='Hamdan', warn_icon=False)
         return
     folder = os.path.join(os.path.expanduser('~'), 'Documents', 'RevitScanner', 'reports')
-    identity = model_identity(revit.doc, Process.GetCurrentProcess().Id)
-    data = latest_model_report(folder, identity)
+    data = current_report(revit.doc)
     if data is None:
-        forms.alert('Run Audit for this model first to create the issue register.', title='Hamdan', warn_icon=False)
+        forms.alert('Run a new scan in this open model first. Previous findings are not restored automatically.', title='Hamdan', warn_icon=False)
         return
-    issues = data.get('review_issues', [])
+    identity = data['review_model_identity']
+    issues = list(data.get('review_issues', []))
     if not issues:
-        forms.alert('No review issues were recorded in the latest audit for this model.', title='Hamdan', warn_icon=False)
+        forms.alert('No review issues were recorded in the current scan.', title='Hamdan', warn_icon=False)
         return
     # Upgrade readable labels in older compatible reports in memory only.
     for issue in issues:
@@ -99,15 +101,32 @@ def main():
                                    name_getter=lambda item: DB.Element.Name.GetValue(item)))
                 except Exception:
                     pass
-    options = [IssueOption(row) for row in issues]
-    chosen = forms.SelectFromList.show(
-        options, title='Hamdan - Review Issues | {} | {}'.format(data.get('model_name', ''), data.get('timestamp', '')),
-        width=1150, height=700, multiselect=False, info_panel=True, button_name='Select & Zoom')
-    if chosen is not None:
+    # Saved UniqueIds remain authoritative. Never rebind an old finding to a reused numeric Id.
+    while True:
+        overlay_issues(issues, load_register(folder, identity))
+        action = forms.CommandSwitchWindow.show(['Select & Zoom', 'Edit tracking', 'Open issue dashboard'],
+                                                message='Hamdan - Review Issues | current scan only')
+        if not action:
+            return
+        if action == 'Open issue dashboard':
+            Process.Start('explorer.exe', issue_dashboard(folder, revit.doc.Title, issues))
+            return
+        chosen = forms.SelectFromList.show([IssueOption(row) for row in issues],
+            title='Hamdan - Review Issues | {} | {}'.format(revit.doc.Title, data.get('timestamp', 'Document checks')),
+            width=1150, height=700, multiselect=False, info_panel=True, button_name=action)
+        if chosen is None:
+            continue
         if isinstance(chosen, IssueOption):
             chosen = chosen.item
-        locate_issue(revit.doc, revit.uidoc, chosen)
+        if action == 'Edit tracking':
+            IssueEditor(folder, identity, chosen).ShowDialog()
+        else:
+            locate_issue(revit.doc, revit.uidoc, chosen)
+            return
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as error:
+        forms.alert(str(error), title='Hamdan - Review Issues', warn_icon=False)

@@ -1,4 +1,5 @@
 import copy
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -7,12 +8,72 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'lib'))
 from hamdan_numbering import plan_numbers, find_conflicts, apply_assignments
-from test_issue_review import extract_functions
+from hamdan_elements import collect_rooms, safe_name
+from test_issue_review import AUDIT, extract_functions
 
 FORMATTER = ROOT / 'Hamdan.tab/Sheets.panel/Prefix Sheet Numbers.pushbutton/script.py'
 
 
 class NumberFormatterTests(unittest.TestCase):
+    def room_fixture(self):
+        calls = []
+        def eid(value): return SimpleNamespace(Value=value)
+        def room(value, phase, placed):
+            return SimpleNamespace(Id=eid(value), UniqueId='room-' + str(value), Number=str(value),
+                Name='Meeting room', CreatedPhaseId=eid(phase), LevelId=eid(7),
+                Location=object() if placed else None, Area=15 if placed else 0,
+                category='rooms', is_type=False,
+                get_Parameter=lambda key: SimpleNamespace(IsReadOnly=False, AsString=lambda: 'Meeting room'))
+        placed = room(2**32, 1, True)
+        unplaced = room(2, 2, False)
+        data = [placed, unplaced] + [SimpleNamespace(category=c, is_type=False) for c in ('areas', 'spaces', 'tags')]
+        data.append(SimpleNamespace(category='rooms', is_type=True))
+        class Collector:
+            def __init__(self, doc): self.rows = list(data)
+            def OfClass(self, cls):
+                raise AssertionError('Room collection must not call OfClass(Room)')
+            def OfCategory(self, category):
+                calls.append(category)
+                self.rows = [r for r in self.rows if r.category == category]
+                return self
+            def WhereElementIsNotElementType(self):
+                self.rows = [r for r in self.rows if not r.is_type]
+                return self
+            def ToElements(self): return self.rows
+            def Dispose(self): calls.append('disposed')
+        DB = SimpleNamespace(FilteredElementCollector=Collector, BuiltInCategory=SimpleNamespace(OST_Rooms='rooms'),
+            BuiltInParameter=SimpleNamespace(ROOM_NAME=1, ROOM_NUMBER=2), ViewSheet=object)
+        doc = SimpleNamespace(PathName='', IsWorkshared=False, GetElement=lambda key: SimpleNamespace(Name='Ground'))
+        return DB, doc, placed, unplaced, calls
+
+    def test_room_collection_excludes_other_spatial_categories_and_keeps_unplaced(self):
+        DB, doc, placed, unplaced, calls = self.room_fixture()
+        self.assertEqual([placed, unplaced], list(collect_rooms(DB, doc)))
+        self.assertEqual(['rooms', 'disposed'], calls)
+
+    def test_room_formatter_collects_native_rooms_preserving_phase_and_64bit_ids(self):
+        DB, doc, placed, unplaced, calls = self.room_fixture()
+        ns = {'DB': DB, 'collect_rooms': collect_rooms, 'safe_name': safe_name,
+              'TARGET_PROPERTIES': {'Rooms': 'Number', 'Sheets': 'SheetNumber'}}
+        extract_functions(FORMATTER, ('collect_records', 'id_value'), ns)
+        records = ns['collect_records'](doc, 'Rooms')
+        self.assertEqual([2**32, 2], [r['id'] for r in records])
+        self.assertEqual(['1', '2'], [r['group'] for r in records])
+        self.assertEqual(['Meeting room', 'Meeting room'], [r['name'] for r in records])
+        self.assertEqual(['rooms', 'disposed'], calls)
+
+    def test_health_inventory_uses_supported_room_collection(self):
+        DB, doc, placed, unplaced, calls = self.room_fixture()
+        ns = {'DB': DB, 'doc': doc, 'os': os, 'FilteredElementCollector': DB.FilteredElementCollector,
+              'collect_rooms': collect_rooms, 'element_id_value': lambda eid: eid.Value,
+              'scan_tick': lambda: None, 'FamilyInstance': type('Family', (), {})}
+        extract_functions(AUDIT, ('model_health_inventory',), ns)
+        result = ns['model_health_inventory']([])
+        self.assertEqual(2, result['room_count'])
+        self.assertEqual([2], result['unplaced_rooms'])
+        self.assertFalse(any(e['message'].startswith('Rooms:') for e in result['check_errors']))
+        self.assertEqual(['rooms', 'disposed'], calls)
+
     def rows(self):
         return [{'id': value, 'unique_id': 'uid{}'.format(value), 'old': 'A{}'.format(value),
                  'name': 'Room {}'.format(value), 'group': 'Sheets', 'editable': True}

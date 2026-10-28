@@ -3,15 +3,13 @@
 import os
 import uuid
 from pyrevit import DB, forms, revit
-from Autodesk.Revit.DB.Architecture import Room
 from System import Object
 from System.Collections.ObjectModel import ObservableCollection
 from System.Windows.Media import Brushes
 
-from hamdan_elements import safe_name
+from hamdan_elements import safe_name, collect_rooms
 from hamdan_numbering import plan_numbers, find_conflicts, apply_assignments, text_type
 
-TARGET_CLASSES = {'Sheets': DB.ViewSheet, 'Rooms': Room}
 TARGET_PROPERTIES = {'Sheets': 'SheetNumber', 'Rooms': 'Number'}
 
 
@@ -24,7 +22,9 @@ def id_value(value):
 
 def collect_records(document, target):
     records = []
-    for element in DB.FilteredElementCollector(document).OfClass(TARGET_CLASSES[target]).WhereElementIsNotElementType():
+    elements = (collect_rooms(DB, document) if target == 'Rooms' else
+                DB.FilteredElementCollector(document).OfClass(DB.ViewSheet).WhereElementIsNotElementType().ToElements())
+    for element in elements:
         name = safe_name(element, lambda item: DB.Element.Name.GetValue(item))
         group = 'Sheets'
         level = ''

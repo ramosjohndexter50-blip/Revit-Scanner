@@ -119,6 +119,54 @@ class ElementListTests(unittest.TestCase):
         self.assertEqual([('selection-changed', 'handler')], removed)
         self.assertIsNone(window.selection_handler)
 
+    def test_add_all_uses_external_event_and_does_not_select_model(self):
+        pending = []
+        cls = self.window_class({'events': SimpleNamespace(execute_in_revit_context=lambda fn: pending.append(fn))})
+        window = cls.__new__(cls)
+        window.status_text = SimpleNamespace(Text='')
+        window.add_all_button = SimpleNamespace(IsEnabled=True)
+        window.add_all_clicked(None, None)
+        self.assertEqual([window.add_all_model], pending)
+        self.assertFalse(window.add_all_button.IsEnabled)
+
+    def test_add_all_collects_over_2000_without_touching_selection_and_cancel_preserves_list(self):
+        doc = SimpleNamespace(IsValidObject=True, GetHashCode=lambda: 42)
+        elements = [SimpleNamespace(Category=SimpleNamespace(CategoryType='Model'), ViewSpecific=False, n=i)
+                    for i in range(2001)]
+        class Collector:
+            def __init__(self, doc): pass
+            def WhereElementIsNotElementType(self): return self
+            def GetElementCount(self): return len(elements)
+            def __iter__(self): return iter(elements)
+            def Dispose(self): pass
+        class Bar:
+            cancel = False
+            def __init__(self, **kwargs): self.cancelled = False
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def update_progress(self, index, total):
+                if self.cancel and index >= 100: self.cancelled = True
+        cls = self.window_class({'ElementListState': ElementListState,
+            'HOST_APP': SimpleNamespace(uiapp=SimpleNamespace(ActiveUIDocument=SimpleNamespace(Document=doc))),
+            'DB': SimpleNamespace(FilteredElementCollector=Collector, CategoryType=SimpleNamespace(Model='Model')),
+            'forms': SimpleNamespace(ProgressBar=Bar),
+            'describe_element': lambda doc, e, **kw: {'unique_id': str(e.n), 'id': e.n, 'display_name': 'Model'}})
+        window = cls.__new__(cls)
+        window.closed = False
+        window.document_key = 42
+        window.state = ElementListState()
+        window.status_text = SimpleNamespace(Text='')
+        window.add_all_button = SimpleNamespace(IsEnabled=False)
+        window.render = lambda: None
+        window.add_all_model()
+        self.assertEqual(2001, len(window.state.rows))
+        window.state.clear()
+        window.state.upsert([{'unique_id': 'keep', 'id': 9999, 'display_name': 'Existing'}])
+        Bar.cancel = True
+        window.add_all_model()
+        self.assertEqual({'keep'}, set(window.state.rows))
+        self.assertTrue(window.add_all_button.IsEnabled)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -29,6 +29,8 @@
                      ToolTip="Search by family, type, category, level or Element ID" TextChanged="search_changed"/>
         </DockPanel>
         <ListView Grid.Row="2" x:Name="element_list" SelectionMode="Extended" Background="White"
+                  VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                  ScrollViewer.CanContentScroll="True"
                   BorderBrush="#D9E2EC" Foreground="#172B4D" HorizontalContentAlignment="Stretch">
             <ListView.View>
                 <GridView>
@@ -45,6 +47,9 @@
             <TextBlock x:Name="status_text" Text="Click an element in the model to begin." Foreground="#475569"
                        TextWrapping="Wrap" Margin="0,0,0,10"/>
             <StackPanel Orientation="Horizontal">
+                <Button x:Name="add_all_button" Content="Add All Model Elements" Click="add_all_clicked"
+                        ToolTip="Add categorized host-model instances without selecting the model. Excludes element types, view-specific annotations and linked contents."/>
+                <Button Content="Select All Rows" Click="select_all_clicked" ToolTip="Select all rows matching the current search in this list."/>
                 <Button Content="Select &amp; Zoom" Click="locate_clicked" Background="#175CD3" Foreground="White"/>
                 <Button Content="Remove from list" Click="remove_clicked"/>
                 <Button Content="Clear list" Click="clear_clicked"/>

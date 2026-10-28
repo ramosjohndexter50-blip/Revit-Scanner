@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Hamdan — Model Health & Clash Audit (v2)
+Hamdan — Model Health & Clash Audit (v3)
 Target: pyRevit IronPython 2.7-compatible syntax, Revit API (verify against installed Revit version)
 Purpose: audit the active Revit model and export JSON history, CSV clashes,
 BCF 2.1 viewpoints, standards checks, health score, and prioritized fixes.
 
 IMPORTANT:
-- This is the audit/report module for the generator, not a geometry generator.
+- Audit/report command: geometry reads only; sheet creation is a separate command.
 - Test on a COPY of your RVT first. It reads the model; it does not modify it.
 - Configure rules in audit_config.json in the generated report folder after the first run.
 """
@@ -38,7 +38,7 @@ def open_text_compat(path, mode):
     return io.open(path, mode, encoding="utf-8")
 
 
-from pyrevit import revit, forms, script
+from pyrevit import revit, forms, script, DB
 from Autodesk.Revit.DB import (
     BuiltInCategory, BuiltInParameter, ElementId, FilteredElementCollector,
     FamilyInstance, IndependentTag, Level, RevitLinkInstance, View3D,
@@ -47,15 +47,24 @@ from Autodesk.Revit.DB import (
 )
 from System.Diagnostics import Process
 from System import Int64
-from hamdan_issues import attach_references, build_issues, model_identity
-from hamdan_elements import describe_element, text_type
+from hamdan_issues import attach_references, build_issues, model_identity, identity_matches
+from hamdan_elements import describe_element, text_type, collect_rooms
+from hamdan_audit import duplicate_pairs, warning_occurrence_key, stable_key, identity_key, penalty_rows, clash_history
+from hamdan_exports import write_bcf21, write_clash_csv
+from hamdan_clashes import ClashEngine
+from hamdan_profiles import effective_config
+from hamdan_tracking import overlay_issues
+from hamdan_session import begin_scan, publish_scan
 from hamdan_scan import (PRESETS, ScanCancelled, ScanProgress, pair_rules, preset_config,
-                         scope_record, in_level_band, classify_pair)
+                         scope_record, in_level_band)
 
 doc = revit.doc
 uidoc = revit.uidoc
 output = script.get_output()
 SCAN_PROGRESS = None
+CHECK_RESULTS = {}
+SCAN_DIAGNOSTICS = []
+CLASH_COVERAGE = {}
 
 
 def scan_tick(label=None, current=None, total=None):
@@ -67,62 +76,7 @@ REPORT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "RevitScanner", 
 CONFIG_PATH = os.path.join(REPORT_DIR, "audit_config.json")
 makedirs_compat(REPORT_DIR)
 
-DEFAULT_CONFIG = {
-    "hard_clash_categories": [
-        ["OST_Walls", "OST_Walls"],
-        ["OST_Walls", "OST_Floors"],
-        ["OST_Walls", "OST_StructuralFraming"],
-        ["OST_Walls", "OST_StructuralColumns"],
-        ["OST_Floors", "OST_StructuralFraming"],
-        ["OST_Floors", "OST_StructuralColumns"],
-        ["OST_Doors", "OST_Walls"],
-        ["OST_Windows", "OST_Walls"],
-        ["OST_DuctCurves", "OST_PipeCurves"],
-        ["OST_DuctCurves", "OST_CableTray"],
-        ["OST_PipeCurves", "OST_CableTray"]
-    ],
-    "clearance_tolerances_mm": {
-        "OST_DuctCurves|OST_Walls": 25,
-        "OST_PipeCurves|OST_Walls": 25,
-        "OST_DuctCurves|OST_StructuralFraming": 50,
-        "OST_PipeCurves|OST_StructuralFraming": 50,
-        "OST_CableTray|OST_Walls": 25
-    },
-    "ignore_hosted_elements": True,
-    "ignore_nested_or_shared_family_components": True,
-    "ignore_same_group": True,
-    "ignore_same_assembly": True,
-    "duplicate_location_tolerance_mm": 10,
-    "family_size_threshold_mb": 20,
-    "required_parameters": {
-        "OST_Doors": ["Mark", "Type Mark", "Level"],
-        "OST_Windows": ["Mark", "Type Mark", "Level"],
-        "OST_Walls": ["Type", "Base Constraint", "Top Constraint"],
-        "OST_Floors": ["Type", "Level"],
-        "OST_StructuralColumns": ["Mark", "Base Level", "Top Level"],
-        "OST_StructuralFraming": ["Mark", "Reference Level"]
-    },
-    "naming_regex": {
-        "views": r"^(A|S|M|E|P|BIM)[-_ ].+",
-        "sheets": r"^[A-Z]{1,3}[-.]?\d{2,4}.*",
-        "levels": r"^(Level|L|Roof|Ground).+",
-        "grids": r"^[A-Z0-9]+$",
-        "worksets": r"^(AR|ST|MEP|EL|PL|Shared|Links)[-_ ].+"
-    },
-    "health_weights": {
-        "hard_clash": 8,
-        "clearance_clash": 3,
-        "critical_revit_warning": 5,
-        "high_revit_warning": 3,
-        "medium_revit_warning": 1,
-        "missing_parameter": 1,
-        "naming_issue": 1,
-        "workset_issue": 2,
-        "duplicate": 3,
-        "link_coordination": 4,
-        "performance_flag": 1
-    }
-}
+from hamdan_config import DEFAULT_CONFIG
 
 
 def now_iso():
@@ -168,31 +122,61 @@ def category_bic_name(element):
 
 
 def get_param_text(element, name):
-    # First try built-in/visible parameter name.
     try:
-        p = element.LookupParameter(name)
-        if p is None:
-            return ""
-        if p.StorageType.ToString() == "String":
-            return p.AsString() or ""
-        value = p.AsValueString()
-        if value:
-            return value
-        if p.StorageType.ToString() == "ElementId":
+        p = get_param(element, name)
+        if p is None or not p.HasValue:
+            if name == 'Level':
+                level = doc.GetElement(element.LevelId)
+                return Element.Name.GetValue(level) if level is not None else ''
+            return ''
+        storage = p.StorageType.ToString()
+        if storage == 'String':
+            return p.AsString() or ''
+        if storage == 'ElementId':
             eid = p.AsElementId()
-            if eid and element_id_value(eid) >= 0:
-                ref = doc.GetElement(eid)
-                return ref.Name if ref else str(element_id_value(eid))
-        return str(p.AsDouble()) if p.StorageType.ToString() == "Double" else str(p.AsInteger())
-    except Exception:
-        return ""
-
+            if element_id_value(eid) == -1:
+                # A wall's unconnected top is a valid negative built-in constraint.
+                return p.AsValueString() or ('Unconnected' if name == 'Top Constraint' else '')
+            if element_id_value(eid) < 0:
+                return p.AsValueString() or ''
+            referenced = doc.GetElement(eid)
+            return Element.Name.GetValue(referenced) if referenced is not None else ''
+        return p.AsValueString() or text_type(p.AsDouble() if storage == 'Double' else p.AsInteger())
+    except Exception as error:
+        if len(SCAN_DIAGNOSTICS) < 500:
+            SCAN_DIAGNOSTICS.append({'type': 'parameter_read', 'element_id': element_id_value(element.Id), 'message': str(error)})
+        return ''
 
 def get_param(element, name):
+    builtins = {'Mark': 'ALL_MODEL_MARK', 'Type Mark': 'ALL_MODEL_TYPE_MARK',
+        'Type': 'ELEM_TYPE_PARAM', 'Level': 'FAMILY_LEVEL_PARAM', 'Reference Level': 'INSTANCE_REFERENCE_LEVEL_PARAM',
+        'Base Constraint': 'WALL_BASE_CONSTRAINT', 'Top Constraint': 'WALL_HEIGHT_TYPE',
+        'Base Level': 'FAMILY_BASE_LEVEL_PARAM', 'Top Level': 'FAMILY_TOP_LEVEL_PARAM'}
     try:
-        return element.LookupParameter(name)
-    except Exception:
-        return None
+        spec = name if isinstance(name, dict) else {'name': name, 'builtin': builtins.get(name)}
+        scope = spec.get('scope', 'either')
+        if scope not in ('instance', 'type', 'either'):
+            raise ValueError('Parameter scope must be instance, type or either.')
+        targets = [element] if scope != 'type' else []
+        if scope != 'instance':
+            type_element = doc.GetElement(element.GetTypeId())
+            if type_element is not None:
+                targets.append(type_element)
+        for target in targets:
+            parameter = None
+            if spec.get('guid'):
+                from System import Guid
+                parameter = target.get_Parameter(Guid(spec['guid']))
+            elif spec.get('builtin'):
+                parameter = target.get_Parameter(getattr(BuiltInParameter, spec['builtin']))
+            if parameter is None and spec.get('name') and not spec.get('guid'):
+                parameter = target.LookupParameter(spec['name'])
+            if parameter is not None:
+                return parameter
+    except Exception as error:
+        if len(SCAN_DIAGNOSTICS) < 500:
+            SCAN_DIAGNOSTICS.append({'type': 'parameter_read', 'element_id': element_id_value(element.Id), 'message': str(error)})
+    return None
 
 
 def get_bbox(element):
@@ -203,25 +187,6 @@ def get_bbox(element):
         return (box.Min.X, box.Min.Y, box.Min.Z, box.Max.X, box.Max.Y, box.Max.Z)
     except Exception:
         return None
-
-
-def bbox_intersection(a, b, tolerance=0.0):
-    if not a or not b:
-        return False
-    return not (
-        a[3] + tolerance < b[0] or b[3] + tolerance < a[0] or
-        a[4] + tolerance < b[1] or b[4] + tolerance < a[1] or
-        a[5] + tolerance < b[2] or b[5] + tolerance < a[2]
-    )
-
-
-def bbox_overlap_volume(a, b):
-    if not bbox_intersection(a, b):
-        return 0.0
-    dx = max(0.0, min(a[3], b[3]) - max(a[0], b[0]))
-    dy = max(0.0, min(a[4], b[4]) - max(a[1], b[1]))
-    dz = max(0.0, min(a[5], b[5]) - max(a[2], b[2]))
-    return dx * dy * dz
 
 
 def get_level_name(element):
@@ -288,146 +253,74 @@ def get_assembly_id(element):
 
 
 def is_nested_family(element):
-    try:
-        if not isinstance(element, FamilyInstance):
-            return False
-        symbol = element.Symbol
-        family = symbol.Family if symbol else None
-        return bool(family and family.IsInPlace)  # best-effort; nested/shared checks vary by family
-    except Exception:
-        return False
-
-
-def is_hosted(element):
-    try:
-        return isinstance(element, FamilyInstance) and element.Host is not None
-    except Exception:
-        return False
-
+    return isinstance(element, FamilyInstance) and element.SuperComponent is not None
 
 def load_config():
     if not os.path.exists(CONFIG_PATH):
         with open_text_compat(CONFIG_PATH, "w") as f:
             json.dump(DEFAULT_CONFIG, f, indent=2)
-        return DEFAULT_CONFIG
-    try:
-        with open_text_compat(CONFIG_PATH, "r") as f:
-            user_config = json.load(f)
-        merged = dict(DEFAULT_CONFIG)
-        merged.update(user_config)
-        for key in ("required_parameters", "naming_regex", "clearance_tolerances_mm", "health_weights"):
-            merged[key] = dict(DEFAULT_CONFIG.get(key, {}), **user_config.get(key, {}))
-        return merged
-    except Exception as ex:
-        forms.alert("Config file could not be read. Using defaults.\n\n{}".format(ex), title="BIM Audit")
-        return DEFAULT_CONFIG
+    if doc is None:
+        return dict(DEFAULT_CONFIG)
+    return effective_config(REPORT_DIR, model_identity(doc, Process.GetCurrentProcess().Id))
 
 
-CONFIG = load_config()
+CONFIG = dict(DEFAULT_CONFIG)
 
 
 def all_model_elements():
+    import time
     elements = []
+    started = time.time()
+    errors = 0
     collector = FilteredElementCollector(doc).WhereElementIsNotElementType()
     total = collector.GetElementCount()
-    for index, element in enumerate(collector):
-        if index % 100 == 0:
-            scan_tick(current=index, total=total)
-        try:
-            if element.Category and not element.ViewSpecific:
-                elements.append(element)
-        except Exception:
-            continue
+    try:
+        for index, element in enumerate(collector):
+            if index % 100 == 0:
+                scan_tick(current=index, total=total)
+            try:
+                if element.Category and not element.ViewSpecific:
+                    elements.append(element)
+            except Exception as error:
+                errors += 1
+                SCAN_DIAGNOSTICS.append({'type': 'inventory_access_error', 'message': str(error)})
+    finally:
+        collector.Dispose()
+    CHECK_RESULTS['inventory'] = {'status': 'INCOMPLETE' if errors else 'PASS', 'seconds': round(time.time() - started, 3),
+                                  'message': '{} categorized, non-view-specific host records; {} inaccessible.'.format(len(elements), errors)}
     return elements
 
 
-def get_bic_map():
-    result = {}
-    for el in all_model_elements():
-        key = category_bic_name(el)
-        if key:
-            result.setdefault(key, []).append(el)
-    return result
-
-
-def element_is_ignored_pair(a, b, config):
-    if config.get("ignore_hosted_elements") and (is_hosted(a) or is_hosted(b)):
+def element_is_ignored_pair(a, b, config, same_source=True):
+    if config.get('ignore_nested_or_shared_family_components') and (is_nested_family(a) or is_nested_family(b)):
         return True
-    if config.get("ignore_nested_or_shared_family_components") and (is_nested_family(a) or is_nested_family(b)):
+    if not same_source:
+        return False
+    # Only suppress the actual host relationship, not every pair involving a hosted fixture.
+    if config.get('ignore_hosted_elements'):
+        for child, parent in ((a, b), (b, a)):
+            if isinstance(child, FamilyInstance) and child.Host is not None and child.Host.Id == parent.Id:
+                return True
+    if config.get('ignore_same_group') and get_group_id(a) is not None and get_group_id(a) == get_group_id(b):
         return True
-    if config.get("ignore_same_group"):
-        ga, gb = get_group_id(a), get_group_id(b)
-        if ga is not None and ga == gb:
-            return True
-    if config.get("ignore_same_assembly"):
-        aa, ab = get_assembly_id(a), get_assembly_id(b)
-        if aa is not None and aa == ab:
-            return True
+    if config.get('ignore_same_assembly') and get_assembly_id(a) is not None and get_assembly_id(a) == get_assembly_id(b):
+        return True
     return False
 
-
-def clash_pair_key(cat_a, cat_b):
-    return "|".join(sorted([cat_a, cat_b]))
-
-
 def detect_clashes(config, band=None):
-    """Native bounding-box prefilter: expand only nearby target elements."""
-    clashes, seen, sources, boxes = [], set(), {}, {}
-    for rule in pair_rules(config):
-        cat_a, cat_b = rule['categories']
-        first_cat = getattr(BuiltInCategory, cat_a)
-        second_cat = getattr(BuiltInCategory, cat_b)
-        scan_tick('Clash scan: {} / {}'.format(cat_a.replace('OST_', ''), cat_b.replace('OST_', '')), 0, 1)
-        if cat_a not in sources:
-            rows = []
-            for index, element in enumerate(FilteredElementCollector(doc).OfCategory(first_cat).WhereElementIsNotElementType()):
-                if index % 100 == 0:
-                    scan_tick()
-                box = get_bbox(element)
-                if box and in_level_band(box, band):
-                    rows.append((element, box))
-            sources[cat_a] = rows
-        rows = sources[cat_a]
-        for index, (a, box_a) in enumerate(rows):
-            scan_tick(current=index, total=len(rows))
-            tolerance = mm_to_internal(rule.get('clearance_mm') or 0)
-            outline = Outline(XYZ(box_a[0] - tolerance, box_a[1] - tolerance, box_a[2] - tolerance),
-                              XYZ(box_a[3] + tolerance, box_a[4] + tolerance, box_a[5] + tolerance))
-            query_filter = BoundingBoxIntersectsFilter(outline)
-            collector = FilteredElementCollector(doc).OfCategory(second_cat).WhereElementIsNotElementType().WherePasses(query_filter)
-            try:
-                for candidate_index, b in enumerate(collector):
-                    if candidate_index % 50 == 0:
-                        scan_tick()
-                    aid, bid = element_id_value(a.Id), element_id_value(b.Id)
-                    if aid == bid or (cat_a == cat_b and aid >= bid):
-                        continue
-                    ids = tuple(sorted((aid, bid)))
-                    if ids in seen:
-                        continue
-                    if bid not in boxes:
-                        boxes[bid] = get_bbox(b)
-                    box_b = boxes[bid]
-                    if not box_b or not in_level_band(box_b, band):
-                        continue
-                    if element_is_ignored_pair(a, b, config):
-                        continue
-                    kind, overlap = classify_pair(box_a, box_b, rule)
-                    if kind is None:
-                        continue
-                    seen.add(ids)
-                    clashes.append({
-                        'clash_id': str(uuid.uuid5(uuid.NAMESPACE_URL, '{}:{}:{}'.format(doc.Title, ids[0], ids[1]))),
-                        'kind': kind, 'status': 'Active', 'element_a': get_element_record(a),
-                        'element_b': get_element_record(b), 'overlap_volume_internal': overlap,
-                        'tolerance_mm': rule['clearance_mm'] if kind == 'Clearance' else 0,
-                        'message': '{} clash between {} ({}) and {} ({})'.format(kind, category_key(a), aid, category_key(b), bid)
-                    })
-            finally:
-                collector.Dispose()
-                query_filter.Dispose()
-                outline.Dispose()
-        scan_tick(current=len(rows), total=len(rows))
+    import time
+    started = time.time()
+    engine = ClashEngine(DB, doc, config, scan_tick, element_is_ignored_pair, SCAN_DIAGNOSTICS)
+    try:
+        clashes = engine.run(band)
+        CHECK_RESULTS['clashes'] = {'status': 'PASS' if engine.stats['complete'] else 'INCOMPLETE',
+                                   'seconds': round(time.time() - started, 3), 'message': 'See geometry coverage and scan notes.'}
+    except Exception as error:
+        engine.stats['complete'] = False
+        CHECK_RESULTS['clashes'] = {'status': 'FAILED', 'seconds': round(time.time() - started, 3), 'message': str(error)}
+        SCAN_DIAGNOSTICS.append({'type': 'clash_check_error', 'message': str(error)})
+        clashes = []
+    CLASH_COVERAGE.update(engine.stats)
     return clashes
 
 
@@ -452,9 +345,9 @@ def validate_naming(config):
         for item in items:
             scan_tick()
             try:
-                if key == "views" and item.IsTemplate:
+                if key == "views" and (item.IsTemplate or isinstance(item, DB.ViewSheet)):
                     continue
-                name = item.Name
+                name = item.SheetNumber if key == 'sheets' else item.Name
                 if not compiled.match(name or ""):
                     issues.append({
                         "type": "naming",
@@ -469,12 +362,12 @@ def validate_naming(config):
     try:
         if doc.IsWorkshared and regexes.get("worksets"):
             pat = re.compile(regexes["worksets"])
-            for ws in doc.GetWorksetTable().GetWorksets():
+            for ws in DB.FilteredWorksetCollector(doc).OfKind(WorksetKind.UserWorkset):
                 if ws.Kind == WorksetKind.UserWorkset and not pat.match(ws.Name or ""):
                     issues.append({"type": "naming", "rule": "worksets", "name": ws.Name,
                                    "message": "Workset name does not match configured regex"})
-    except Exception:
-        pass
+    except Exception as error:
+        issues.append({'type': 'workset_naming_error', 'message': str(error)})
     return issues
 
 
@@ -507,7 +400,7 @@ def required_parameter_check(elements, config):
                 else:
                     missing.append({"element_id": element_id_value(el.Id), "category": cat,
                                     "element_name": str(getattr(el, "Name", "")),
-                                    "parameter": pname})
+                                    "parameter": pname.get("name", pname.get("builtin", pname.get("guid", ""))) if isinstance(pname, dict) else pname})
         results.append({
             "category": cat, "element_count": len(items), "required_count": len(names),
             "filled_percent": round((filled / float(total)) * 100.0, 2) if total else 100.0,
@@ -517,47 +410,35 @@ def required_parameter_check(elements, config):
 
 
 def workset_health():
-    issues = []
     if not doc.IsWorkshared:
-        return [{"type": "workset_info", "message": "Model is not workshared; workset checks skipped."}]
+        return [{'type': 'workset_info', 'message': 'Model is not workshared; workset checks are not applicable.'}]
+    issues, counts, owned_self, owned_other = [], {}, 0, 0
+    worksets = list(DB.FilteredWorksetCollector(doc).OfKind(WorksetKind.UserWorkset))
+    collector = FilteredElementCollector(doc).WhereElementIsNotElementType()
     try:
-        worksets = list(doc.GetWorksetTable().GetWorksets())
-        user_worksets = [ws for ws in worksets if ws.Kind == WorksetKind.UserWorkset]
-        for ws in user_worksets:
-            if ws.Name == "Workset1":
-                count = 0
-                for el in FilteredElementCollector(doc).WhereElementIsNotElementType():
-                    scan_tick()
-                    try:
-                        if element_id_value(el.WorksetId) == element_id_value(ws.Id):
-                            count += 1
-                    except Exception:
-                        pass
-                if count:
-                    issues.append({"type": "workset_default", "workset": ws.Name, "count": count,
-                                   "message": "{} elements remain on default Workset1".format(count)})
-            try:
-                if not ws.IsOpen:
-                    issues.append({"type": "workset_closed", "workset": ws.Name,
-                                   "message": "Workset is closed"})
-            except Exception:
-                pass
-        # Borrowed status is API/version/worksharing-state dependent.
-        borrowed = 0
-        for el in FilteredElementCollector(doc).WhereElementIsNotElementType():
+        for element in collector:
             scan_tick()
             try:
-                if el.IsBorrowed:
-                    borrowed += 1
-            except Exception:
-                pass
-        if borrowed:
-            issues.append({"type": "borrowed_elements", "count": borrowed,
-                           "message": "{} elements are currently borrowed".format(borrowed)})
-    except Exception as ex:
-        issues.append({"type": "workset_check_error", "message": str(ex)})
+                key = element_id_value(element.WorksetId)
+                counts[key] = counts.get(key, 0) + 1
+                status = DB.WorksharingUtils.GetCheckoutStatus(doc, element.Id)
+                owned_self += int(status == DB.CheckoutStatus.OwnedByCurrentUser)
+                owned_other += int(status == DB.CheckoutStatus.OwnedByOtherUser)
+            except Exception as error:
+                issues.append({'type': 'workset_check_error', 'element_id': element_id_value(element.Id), 'message': str(error)})
+    finally:
+        collector.Dispose()
+    for ws in worksets:
+        count = counts.get(element_id_value(ws.Id), 0)
+        if ws.Name.lower() == 'workset1' and count:
+            issues.append({'type': 'workset_default', 'workset': ws.Name, 'count': count,
+                           'message': '{} elements on default Workset1; review against the BEP.'.format(count)})
+        if not ws.IsOpen:
+            issues.append({'type': 'workset_closed_info', 'workset': ws.Name,
+                           'message': 'Workset is closed; its unloaded contents were not audited.'})
+    issues.append({'type': 'ownership_info', 'owned_by_current_user': owned_self, 'owned_by_other_user': owned_other,
+                   'message': 'Checkout ownership: {} current user, {} other users (local cached status).'.format(owned_self, owned_other)})
     return issues
-
 
 def link_coordination_checks():
     issues = []
@@ -569,7 +450,7 @@ def link_coordination_checks():
                 # Report positioning for manual verification; Revit API does not provide one
                 # universal reliable "shared coordinates used" flag for every link workflow.
                 issues.append({
-                    "type": "link_positioning_review",
+                    "type": "link_positioning_info",
                     "element_id": element_id_value(link.Id),
                     "link_name": link.Name,
                     "pinned": bool(link.Pinned),
@@ -579,88 +460,58 @@ def link_coordination_checks():
             except Exception as link_ex:
                 issues.append({"type": "link_check_error", "element_id": element_id_value(link.Id),
                                "message": str(link_ex)})
-        # True North / Project North is a view-orientation setting, not one global model flag.
-        for view in FilteredElementCollector(doc).OfClass(View3D).ToElements():
-            if view.IsTemplate:
-                continue
-            try:
-                if view.ViewType == ViewType.ThreeD and not view.IsSectionBoxActive:
-                    issues.append({"type": "3d_view_no_section_box", "element_id": element_id_value(view.Id),
-                                   "view": view.Name, "message": "3D view has no active section box"})
-            except Exception:
-                pass
     except Exception as ex:
         issues.append({"type": "link_check_error", "message": str(ex)})
     return issues
 
 
 def duplicate_detection(elements, config):
-    tol = mm_to_internal(config.get("duplicate_location_tolerance_mm", 10))
-    buckets = {}
-    duplicates = []
-    for el in elements:
+    records = []
+    for element in elements:
         scan_tick()
         try:
-            loc = el.Location
-            point = getattr(loc, "Point", None)
-            if point is None:
-                curve = getattr(loc, "Curve", None)
-                if curve:
-                    point = curve.Evaluate(0.5, True)
-            if point is None:
-                continue
-            cat = category_bic_name(el)
-            typ = get_type_name(el)
-            key = (cat, typ, round(point.X / max(tol, 1e-9)), round(point.Y / max(tol, 1e-9)),
-                   round(point.Z / max(tol, 1e-9)))
-            if key in buckets:
-                other = buckets[key]
-                duplicates.append({"type": "duplicate", "element_a": element_id_value(other.Id),
-                                   "element_b": element_id_value(el.Id), "category": cat, "type_name": typ,
-                                   "message": "Possible duplicate: same category/type/location within tolerance"})
+            location = element.Location
+            point = getattr(location, 'Point', None)
+            if point is not None:
+                points, kind = [[point.X, point.Y, point.Z]], 'point'
             else:
-                buckets[key] = el
-        except Exception:
-            continue
-    return duplicates
-
+                curve = getattr(location, 'Curve', None)
+                if curve is None:
+                    continue
+                points = [[p.X, p.Y, p.Z] for p in (curve.Evaluate(0, True), curve.Evaluate(.25, True),
+                          curve.Evaluate(.5, True), curve.Evaluate(.75, True), curve.Evaluate(1, True))]
+                kind = curve.GetType().FullName
+            orientation = None
+            mirrored = False
+            if isinstance(element, FamilyInstance):
+                transform = element.GetTransform()
+                orientation = tuple(round(getattr(v, axis), 8) for v in (transform.BasisX, transform.BasisY, transform.BasisZ)
+                                    for axis in ('X', 'Y', 'Z'))
+                mirrored = element.Mirrored
+            records.append({'id': element_id_value(element.Id), 'category': category_bic_name(element),
+                'type_id': element_id_value(element.GetTypeId()), 'phase': element_id_value(element.CreatedPhaseId),
+                'option': element_id_value(element.DesignOption.Id) if element.DesignOption is not None else -1,
+                'host': element_id_value(element.Host.Id) if isinstance(element, FamilyInstance) and element.Host is not None else -1,
+                'points': points, 'kind': kind, 'orientation': orientation, 'mirrored': mirrored})
+        except Exception as error:
+            if len(SCAN_DIAGNOSTICS) < 500:
+                SCAN_DIAGNOSTICS.append({'type': 'duplicate_skip', 'element_id': element_id_value(element.Id), 'message': str(error)})
+    return [{'type': 'duplicate', 'element_a': a['id'], 'element_b': b['id'], 'category': a['category'],
+             'message': 'Duplicate candidate: same type identity, context, orientation and sampled location; verify full geometry.'}
+            for a, b in duplicate_pairs(records, mm_to_internal(config.get('duplicate_location_tolerance_mm', 10)), scan_tick)]
 
 def unused_and_performance_checks(config):
     issues = []
-    # Unused checks are best-effort: Revit exposes usage differently by object type.
-    try:
-        for template in FilteredElementCollector(doc).OfClass(View3D).ToElements():
-            if not template.IsTemplate:
-                try:
-                    if not template.IsSectionBoxActive:
-                        issues.append({"type": "performance", "element_id": element_id_value(template.Id),
-                                       "message": "3D view '{}' has no section box".format(template.Name)})
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    try:
-        symbols = FilteredElementCollector(doc).OfClass(FamilyInstance).WhereElementIsNotElementType().ToElements()
-        families = {}
-        for inst in symbols:
-            try:
-                fam = inst.Symbol.Family
-                if fam:
-                    families[element_id_value(fam.Id)] = fam
-            except Exception:
-                pass
-        threshold = float(config.get("family_size_threshold_mb", 20))
-        for fam in families.values():
-            try:
-                # Family file size cannot generally be read from a loaded family in the project.
-                # Mark as not measurable rather than inventing a size.
-                pass
-            except Exception:
-                pass
-        issues.append({"type": "performance_info", "message":
-                       "Family file-size and nested-family-depth checks need family-document inspection; not inferred from loaded model."})
-    except Exception:
-        pass
+    for view in FilteredElementCollector(doc).OfClass(View3D):
+        scan_tick()
+        try:
+            if not view.IsTemplate and not view.IsSectionBoxActive:
+                issues.append({'type': 'performance', 'element_id': element_id_value(view.Id),
+                               'message': "3D view '{}' has no section box; review its intended use.".format(view.Name)})
+        except Exception as error:
+            issues.append({'type': 'performance_error', 'message': str(error)})
+    issues.append({'type': 'performance_info', 'message':
+        'Family file size, nested-family depth and purgeability were not measured; they require a separate content audit.'})
     return issues
 
 
@@ -678,10 +529,7 @@ def warning_severity(description):
 def document_warnings():
     """Group native Revit warnings without changing the model."""
     grouped = {}
-    try:
-        warnings = doc.GetWarnings()
-    except Exception:
-        return []
+    warnings = doc.GetWarnings()
     for warning in warnings:
         scan_tick()
         try:
@@ -694,21 +542,25 @@ def document_warnings():
             item = grouped.setdefault(key, {
                 "type": "revit_warning", "failure_id": failure_id,
                 "description": description, "severity": warning_severity(description),
-                "count": 0, "element_ids": []
+                "count": 0, "element_ids": [], "occurrences": []
             })
+            failing = [element_id_value(v) for v in warning.GetFailingElements()]
+            additional = [element_id_value(v) for v in warning.GetAdditionalElements()]
+            item['occurrences'].append({'key': warning_occurrence_key(failure_id, description, failing, additional),
+                                        'element_ids': failing, 'additional_ids': additional})
             item["count"] += 1
             for element_id in warning.GetFailingElements():
                 value = element_id_value(element_id)
                 if value >= 0 and value not in item["element_ids"]:
                     item["element_ids"].append(value)
-        except Exception:
-            continue
+        except Exception as error:
+            raise RuntimeError('Could not read native warning: {}'.format(error))
     return sorted(grouped.values(), key=lambda item: (-item["count"], item["description"]))
 
 
 def model_health_inventory(elements):
     """Collect practical project-health metrics without editing the model."""
-    result = {"issues": [], "links": [], "duplicate_marks": [], "unplaced_rooms": [], "unplaced_views": [],
+    result = {"issues": [], "check_errors": [], "links": [], "duplicate_marks": [], "unplaced_rooms": [], "unenclosed_rooms": [], "unplaced_views": [],
               "imported_cad_elements": []}
     path = getattr(doc, "PathName", "") or ""
     result["model_path"] = path
@@ -723,11 +575,26 @@ def model_health_inventory(elements):
         for link in links:
             try:
                 result["links"].append({"id": element_id_value(link.Id), "name": link.Name,
-                                        "loaded": link.GetLinkDocument() is not None})
-            except Exception:
-                pass
-    except Exception:
-        pass
+                                        "loaded": bool(DB.RevitLinkType.IsLoaded(doc, link.GetTypeId())),
+                                        "document_available": link.GetLinkDocument() is not None})
+            except Exception as error:
+                result['check_errors'].append({'type': 'inventory_error', 'message': str(error)})
+    except Exception as error:
+        result['check_errors'].append({'type': 'inventory_error', 'message': str(error)})
+
+    try:
+        result['workset_count'] = len(list(DB.FilteredWorksetCollector(doc).OfKind(WorksetKind.UserWorkset))) if doc.IsWorkshared else 0
+        result['central_model_path'] = (DB.ModelPathUtils.ConvertModelPathToUserVisiblePath(doc.GetWorksharingCentralModelPath())
+                                        if doc.IsWorkshared else '')
+        sheets = list(FilteredElementCollector(doc).OfClass(DB.ViewSheet))
+        result['sheet_count'] = len([sheet for sheet in sheets if not sheet.IsPlaceholder])
+        result['view_count'] = len([v for v in FilteredElementCollector(doc).OfClass(DB.View) if not v.IsTemplate])
+        result['in_place_family_count'] = len([f for f in FilteredElementCollector(doc).OfClass(DB.Family) if f.IsInPlace])
+        result['design_option_count'] = FilteredElementCollector(doc).OfClass(DB.DesignOption).GetElementCount()
+        result['model_group_count'] = FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_IOSModelGroups).WhereElementIsNotElementType().GetElementCount()
+        result['detail_group_count'] = FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_IOSDetailGroups).WhereElementIsNotElementType().GetElementCount()
+    except Exception as error:
+        result['check_errors'].append({'type': 'inventory_error', 'message': 'Model metadata: {}'.format(error)})
 
     mark_map = {}
     for element in elements:
@@ -735,13 +602,13 @@ def model_health_inventory(elements):
         if not isinstance(element, FamilyInstance):
             continue
         try:
-            mark = element.LookupParameter("Mark")
+            mark = get_param(element, "Mark")
             value = mark.AsString() if mark else None
             if value and value.strip():
                 key = (category_bic_name(element), value.strip())
                 mark_map.setdefault(key, []).append(element_id_value(element.Id))
-        except Exception:
-            pass
+        except Exception as error:
+            result['check_errors'].append({'type': 'inventory_error', 'message': str(error)})
     for key, ids in mark_map.items():
         if len(ids) > 1:
             result["duplicate_marks"].append({"category": key[0], "mark": key[1], "element_ids": ids})
@@ -750,18 +617,23 @@ def model_health_inventory(elements):
                                  "message": "{} duplicate Mark value group(s) need review.".format(len(result["duplicate_marks"]))})
 
     try:
-        room_class = __import__("Autodesk.Revit.DB.Architecture", fromlist=["Room"]).Room
-        rooms = FilteredElementCollector(doc).OfClass(room_class).ToElements()
+        rooms = collect_rooms(DB, doc)
         result["room_count"] = len(rooms)
         for room in rooms:
             scan_tick()
             if room.Location is None:
                 result["unplaced_rooms"].append(element_id_value(room.Id))
+            elif room.Area <= 0:
+                result["unenclosed_rooms"].append(element_id_value(room.Id))
         if result["unplaced_rooms"]:
             result["issues"].append({"type": "unplaced_rooms", "severity": "MEDIUM", "count": len(result["unplaced_rooms"]),
-                                     "message": "{} room(s) are unplaced or not enclosed.".format(len(result["unplaced_rooms"]))})
-    except Exception:
-        result["room_count"] = 0
+                                     "message": "{} room(s) are unplaced.".format(len(result["unplaced_rooms"]))})
+        if result['unenclosed_rooms']:
+            result['issues'].append({'type': 'unenclosed_rooms', 'severity': 'MEDIUM', 'count': len(result['unenclosed_rooms']),
+                                     'message': '{} placed room(s) have zero area; review enclosure/redundancy.'.format(len(result['unenclosed_rooms']))})
+    except Exception as error:
+        result['room_count'] = None
+        result['check_errors'].append({'type': 'inventory_error', 'message': 'Rooms: {}'.format(error)})
 
     try:
         view_class = __import__("Autodesk.Revit.DB", fromlist=["View"]).View
@@ -771,18 +643,21 @@ def model_health_inventory(elements):
             scan_tick()
             for view_id in sheet.GetAllPlacedViews():
                 placed.add(element_id_value(view_id))
+        for instance in FilteredElementCollector(doc).OfClass(DB.ScheduleSheetInstance):
+            if not instance.IsTitleblockRevisionSchedule:
+                placed.add(element_id_value(instance.ScheduleId))
         for view in FilteredElementCollector(doc).OfClass(view_class).ToElements():
             scan_tick()
             try:
-                if not view.IsTemplate and view.CanBePrinted and element_id_value(view.Id) not in placed:
+                if not view.IsTemplate and not isinstance(view, DB.ViewSheet) and view.CanBePrinted and element_id_value(view.Id) not in placed:
                     result["unplaced_views"].append({"id": element_id_value(view.Id), "name": view.Name})
-            except Exception:
-                pass
+            except Exception as error:
+                result['check_errors'].append({'type': 'inventory_error', 'message': str(error)})
         if result["unplaced_views"]:
             result["issues"].append({"type": "unplaced_views", "severity": "LOW", "count": len(result["unplaced_views"]),
                                      "message": "{} printable view(s) are not placed on sheets.".format(len(result["unplaced_views"]))})
-    except Exception:
-        pass
+    except Exception as error:
+        result['check_errors'].append({'type': 'inventory_error', 'message': str(error)})
 
     try:
         import_class = __import__("Autodesk.Revit.DB", fromlist=["ImportInstance"]).ImportInstance
@@ -794,42 +669,50 @@ def model_health_inventory(elements):
         if result["imported_cad_count"]:
             result["issues"].append({"type": "imported_cad", "severity": "MEDIUM", "count": result["imported_cad_count"],
                                      "message": "{} imported CAD instance(s) found; review whether linking is more appropriate.".format(result["imported_cad_count"])})
-    except Exception:
-        result["imported_cad_count"] = 0
-        result["linked_cad_count"] = 0
+    except Exception as error:
+        result['check_errors'].append({'type': 'inventory_error', 'message': 'CAD: {}'.format(error)})
     return result
 
 
 def collect_standards(elements, config):
+    import time
     result = {}
-    checks = [
-        ('revit_warnings', 'Revit warnings', document_warnings),
+    checks = [('revit_warnings', 'Revit warnings', document_warnings),
         ('model_health', 'Model health', lambda: model_health_inventory(elements)),
         ('naming_issues', 'Naming rules', lambda: validate_naming(config)),
         ('required_parameters', 'Required parameters', lambda: required_parameter_check(elements, config)),
         ('workset_issues', 'Worksets', workset_health),
         ('link_and_view_issues', 'Links and views', link_coordination_checks),
         ('duplicates', 'Duplicate candidates', lambda: duplicate_detection(elements, config)),
-        ('performance_flags', 'Performance checks', lambda: unused_and_performance_checks(config))
-    ]
+        ('performance_flags', 'Performance checks', lambda: unused_and_performance_checks(config))]
     for index, (key, label, check) in enumerate(checks):
         scan_tick(label, index, len(checks))
-        result[key] = check()
-    scan_tick(current=len(checks), total=len(checks))
+        started = time.time()
+        notes_before = len(SCAN_DIAGNOSTICS)
+        try:
+            result[key] = check()
+            entries = result[key] if isinstance(result[key], list) else result[key].get('check_errors', [])
+            errors = [i for i in entries if i.get('type', '').endswith('_error')]
+            closed = any(i.get('type') == 'workset_closed_info' for i in entries)
+            closed = closed or len(SCAN_DIAGNOSTICS) > notes_before
+            CHECK_RESULTS[key] = {'status': 'FAILED' if errors else 'INCOMPLETE' if closed else 'PASS',
+                                  'seconds': round(time.time() - started, 3),
+                                  'message': '; '.join(i.get('message', '') for i in errors[:5])}
+        except Exception as error:
+            result[key] = {} if key == 'model_health' else []
+            CHECK_RESULTS[key] = {'status': 'FAILED', 'seconds': round(time.time() - started, 3), 'message': str(error)}
+            SCAN_DIAGNOSTICS.append({'type': 'check_error', 'check': key, 'message': str(error)})
     return result
-
 
 def flatten_warnings(clashes, standards):
     warnings = []
     for c in clashes:
         warnings.append({"key": "clash:" + c["clash_id"], "kind": "clash", "severity": c["kind"],
                          "status": c.get("status", "Active"), "message": c["message"]})
-    for issue in standards.get("revit_warnings", []):
-        warnings.append({
-            "key": "revitwarning:" + issue["failure_id"], "kind": "revit_warning",
-            "severity": issue["severity"], "status": "Active",
-            "message": "{} occurrence(s): {}".format(issue["count"], issue["description"])
-        })
+    for issue in standards.get('revit_warnings', []):
+        for occurrence in issue.get('occurrences', []):
+            warnings.append({'key': occurrence['key'], 'kind': 'revit_warning', 'severity': issue['severity'],
+                             'status': 'Active', 'message': issue['description'], 'element_ids': occurrence['element_ids']})
     for issue in standards.get("naming_issues", []):
         warnings.append({"key": "naming:{}:{}".format(issue.get("rule"), issue.get("element_id", issue.get("name"))),
                          "kind": "warning", "severity": "Low", "status": "Active", "message": issue["message"]})
@@ -842,7 +725,7 @@ def flatten_warnings(clashes, standards):
         for issue in standards.get(group, []):
             if issue.get("type", "").endswith("_info"):
                 continue
-            warnings.append({"key": "{}:{}:{}".format(group, issue.get("type"), issue.get("element_id", issue.get("element_a", issue.get("workset", issue.get("message", ""))))),
+            warnings.append({"key": "{}:{}:{}".format(group, issue.get("type"), issue.get("element_id", stable_key([issue.get("element_a"), issue.get("element_b")]) if "element_a" in issue else issue.get("workset", issue.get("message", "")))),
                              "kind": "warning", "severity": "Medium", "status": "Active",
                              "message": issue.get("message", str(issue))})
     for issue in standards.get("model_health", {}).get("issues", []):
@@ -866,14 +749,14 @@ def load_previous_audit(current_doc_key, scan_scope=None):
         try:
             with open_text_compat(path, "r") as f:
                 data = json.load(f)
-            if data.get("document_key") == current_doc_key and data.get('scan_scope') == scan_scope:
+            if data.get("document_key") == current_doc_key and data.get("schema_version") in ("3.0", "3.1") and data.get("audit_complete", False) and data.get('scan_scope') == scan_scope:
                 return data
         except Exception:
             continue
     return None
 
 
-def compare_history(current_warnings, previous):
+def compare_history(current_warnings, previous, complete=True):
     previous_map = {w.get("key"): w for w in (previous or {}).get("warnings", [])}
     current_map = {w.get("key"): w for w in current_warnings}
     changes = []
@@ -881,76 +764,18 @@ def compare_history(current_warnings, previous):
         state = "UNCHANGED" if key in previous_map else "NEW"
         changes.append(dict(warning, trend=state))
     for key, warning in previous_map.items():
-        if key not in current_map:
+        if complete and key not in current_map:
             changes.append(dict(warning, trend="RESOLVED", status="Resolved"))
     return changes
 
 
 def health_score(clashes, standards, config):
-    weights = config.get("health_weights", {})
-    penalty = len([c for c in clashes if c.get("kind") == "Hard"]) * weights.get("hard_clash", 8)
-    penalty += len([c for c in clashes if c.get("kind") == "Clearance"]) * weights.get("clearance_clash", 3)
-    for warning in standards.get("revit_warnings", []):
-        severity = warning.get("severity", "LOW").lower()
-        penalty += warning.get("count", 1) * weights.get(severity + "_revit_warning", 0)
-    penalty += sum(len(c.get("missing", [])) for c in standards.get("required_parameters", [])) * weights.get("missing_parameter", 1)
-    penalty += len(standards.get("naming_issues", [])) * weights.get("naming_issue", 1)
-    penalty += len([i for i in standards.get("workset_issues", []) if i.get("type") not in ("workset_info",)]) * weights.get("workset_issue", 2)
-    penalty += len(standards.get("duplicates", [])) * weights.get("duplicate", 3)
-    penalty += len([i for i in standards.get("link_and_view_issues", []) if i.get("type") == "link_positioning_review"]) * weights.get("link_coordination", 4)
-    penalty += len([i for i in standards.get("performance_flags", []) if i.get("type") == "performance"]) * weights.get("performance_flag", 1)
-    for issue in standards.get("model_health", {}).get("issues", []):
-        severity = issue.get("severity", "LOW")
-        multiplier = 3 if severity == "HIGH" else (2 if severity == "MEDIUM" else 1)
-        penalty += issue.get("count", 1) * multiplier
-    return max(0, min(100, 100 - penalty))
-
+    if any(row.get('status') in ('FAILED', 'INCOMPLETE') for row in CHECK_RESULTS.values()):
+        return None
+    return max(0, min(100, 100 - sum(row['impact'] for row in penalty_rows(clashes, standards, config))))
 
 def fix_first(clashes, standards, config):
-    weights = config.get("health_weights", {})
-    actions = []
-    hard = [c for c in clashes if c.get("kind") == "Hard"]
-    clear = [c for c in clashes if c.get("kind") == "Clearance"]
-    if hard:
-        actions.append({"impact": len(hard) * weights.get("hard_clash", 8), "title": "Resolve hard clashes",
-                        "count": len(hard), "details": "Review intersecting element pairs and adjust geometry/coordination."})
-    if clear:
-        actions.append({"impact": len(clear) * weights.get("clearance_clash", 3), "title": "Resolve clearance clashes",
-                        "count": len(clear), "details": "Check service access and configured category-pair tolerances."})
-    for severity in ("CRITICAL", "HIGH", "MEDIUM"):
-        findings = [w for w in standards.get("revit_warnings", []) if w.get("severity") == severity]
-        count = sum(w.get("count", 1) for w in findings)
-        if count:
-            weight = weights.get(severity.lower() + "_revit_warning", 0)
-            actions.append({"impact": count * weight, "title": "Resolve {} Revit warnings".format(severity.lower()),
-                            "count": count, "details": "Review the grouped native Revit warnings and affected element IDs."})
-    missing = sum(len(c.get("missing", [])) for c in standards.get("required_parameters", []))
-    if missing:
-        actions.append({"impact": missing * weights.get("missing_parameter", 1), "title": "Complete required parameters",
-                        "count": missing, "details": "Fill required parameters by category; see parameter completeness table."})
-    naming = len(standards.get("naming_issues", []))
-    if naming:
-        actions.append({"impact": naming * weights.get("naming_issue", 1), "title": "Fix naming convention violations",
-                        "count": naming, "details": "Rename views, sheets, levels, grids, and worksets to match regex rules."})
-    duplicates = len(standards.get("duplicates", []))
-    if duplicates:
-        actions.append({"impact": duplicates * weights.get("duplicate", 3), "title": "Review possible duplicate elements",
-                        "count": duplicates, "details": "Confirm duplicates before deleting anything."})
-    worksets = len(standards.get("workset_issues", []))
-    if worksets:
-        actions.append({"impact": worksets * weights.get("workset_issue", 2), "title": "Review workset health",
-                        "count": worksets, "details": "Move elements off Workset1 and review closed/borrowed worksets."})
-    links = len([i for i in standards.get("link_and_view_issues", []) if i.get("type") == "link_positioning_review"])
-    if links:
-        actions.append({"impact": links * weights.get("link_coordination", 4), "title": "Verify linked-model coordination",
-                        "count": links, "details": "Confirm link positioning and shared coordinates with each discipline."})
-    for issue in standards.get("model_health", {}).get("issues", []):
-        impact = issue.get("count", 1) * (3 if issue.get("severity") == "HIGH" else 2)
-        actions.append({"impact": impact, "title": issue.get("message", "Review model health issue"),
-                        "count": issue.get("count", 1), "details": "Open the HTML dashboard for the affected-item inventory."})
-    actions.sort(key=lambda x: x["impact"], reverse=True)
-    return actions[:10]
-
+    return penalty_rows(clashes, standards, config)[:10]
 
 def discipline_name(cat):
     cat = cat or ""
@@ -994,97 +819,10 @@ def breakdown_tables(elements, clashes):
 
 
 def export_clashes_csv(clashes, path):
-    fields = ["clash_id", "kind", "status", "element_a_id", "element_a_category", "element_a_name",
-              "element_a_level", "element_b_id", "element_b_category", "element_b_name",
-              "element_b_level", "tolerance_mm", "message"]
-    with open(path, "wb") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        for c in clashes:
-            scan_tick()
-            a, b = c["element_a"], c["element_b"]
-            writer.writerow({
-                "clash_id": c["clash_id"], "kind": c["kind"], "status": c.get("status", "Active"),
-                "element_a_id": a["id"], "element_a_category": a["category_name"], "element_a_name": a["name"],
-                "element_a_level": a["level"], "element_b_id": b["id"], "element_b_category": b["category_name"],
-                "element_b_name": b["name"], "element_b_level": b["level"],
-                "tolerance_mm": c.get("tolerance_mm", 0), "message": c["message"]
-            })
-
-
-def bcf_guid(value):
-    return "{" + str(value).upper() + "}"
-
+    write_clash_csv(clashes, path, scan_tick)
 
 def export_bcf21(clashes, path, project_name):
-    """Write a minimal BCF 2.1 ZIP with one viewpoint per clash (AABB center camera)."""
-    import xml.etree.ElementTree as ET
-    ns = "http://www.buildingsmart-tech.org/bcf/2.1"
-    ET.register_namespace("", ns)
-    root = ET.Element("Markup", {"xmlns": ns})
-    header = ET.SubElement(root, "Header")
-    ET.SubElement(header, "File", {"IfcProject": "", "IfcSpatialStructureElement": "", "isExternal": "true", "filename": project_name + ".rvt"})
-    topic_list = []
-    temp_dir = os.path.join(REPORT_DIR, "_bcf_temp_" + uuid.uuid4().hex)
-    makedirs_compat(temp_dir)
-    try:
-        for c in clashes:
-            scan_tick()
-            topic_guid = bcf_guid(c["clash_id"])
-            topic_dir = os.path.join(temp_dir, topic_guid)
-            makedirs_compat(topic_dir)
-            topic = ET.SubElement(root, "Topic", {
-                "Guid": topic_guid, "TopicType": "Clash", "TopicStatus": c.get("status", "Active"),
-                "Title": c["message"][:200], "Priority": "Normal", "Index": str(len(topic_list) + 1),
-                "CreationDate": now_iso(), "CreationAuthor": "Hamdan"
-            })
-            ET.SubElement(topic, "Description").text = c["message"]
-            viewpoint_guid = bcf_guid(uuid.uuid5(uuid.NAMESPACE_URL, c["clash_id"] + ":viewpoint"))
-            viewpoint = ET.SubElement(topic, "Viewpoints")
-            ET.SubElement(viewpoint, "ViewPoint", {"Guid": viewpoint_guid, "Viewpoint": "viewpoint.bcfv"})
-            # Minimal viewpoint with selected components. BCF viewers may require richer camera/IFC GUID data.
-            vroot = ET.Element("VisualizationInfo", {"xmlns": ns})
-            components = ET.SubElement(vroot, "Components")
-            selection = ET.SubElement(components, "Selection")
-            for rec in (c["element_a"], c["element_b"]):
-                ET.SubElement(selection, "Component", {"IfcGuid": "", "OriginatingSystem": "Autodesk Revit",
-                                                       "AuthoringToolId": str(rec["unique_id"])})
-            box_a = c["element_a"].get("bbox_internal")
-            box_b = c["element_b"].get("bbox_internal")
-            if box_a and box_b:
-                center = [(min(box_a[i], box_b[i]) + max(box_a[i + 3], box_b[i + 3])) / 2.0 for i in range(3)]
-            else:
-                center = [0.0, 0.0, 0.0]
-            camera = ET.SubElement(vroot, "PerspectiveCamera")
-            ET.SubElement(camera, "CameraViewPoint").attrib.update({"X": str(center[0]), "Y": str(center[1]), "Z": str(center[2] + 10)})
-            ET.SubElement(camera, "CameraDirection").attrib.update({"X": "0", "Y": "0", "Z": "-1"})
-            ET.SubElement(camera, "CameraUpVector").attrib.update({"X": "0", "Y": "1", "Z": "0"})
-            ET.SubElement(camera, "FieldOfView").text = "60"
-            ET.SubElement(camera, "AspectRatio").text = "1.7777778"
-            with open(os.path.join(topic_dir, "markup.bcf"), "wb") as f:
-                f.write(ET.tostring(root, encoding="utf-8"))
-            with open(os.path.join(topic_dir, "viewpoint.bcfv"), "wb") as f:
-                f.write(ET.tostring(vroot, encoding="utf-8"))
-            topic_list.append(topic_guid)
-        # Rebuild a single root markup file for the package root.
-        root_path = os.path.join(temp_dir, "markup.bcf")
-        with open(root_path, "wb") as f:
-            f.write(ET.tostring(root, encoding="utf-8"))
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.write(root_path, "markup.bcf")
-            for dirpath, _, filenames in os.walk(temp_dir):
-                for filename in filenames:
-                    full = os.path.join(dirpath, filename)
-                    rel = os.path.relpath(full, temp_dir)
-                    if rel != "markup.bcf":
-                        zf.write(full, rel)
-    finally:
-        try:
-            import shutil
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception:
-            pass
-
+    write_bcf21(clashes, path, project_name, scan_tick, os.environ.get('USERNAME') or 'Hamdan')
 
 def report_file_link(path):
     return "file:///" + path.replace("\\", "/").replace(" ", "%20")
@@ -1123,12 +861,20 @@ def export_html_dashboard(data, path):
     export_links = []
     for label, export_path in sorted(data.get("exports", {}).items()):
         export_links.append('<a class="export" href="{}">{}</a>'.format(report_file_link(export_path), html_escape(label)))
-    score = data.get("health_score", 0)
-    score_class = "good" if score >= 80 else ("warn" if score >= 60 else "bad")
+    score = data.get('health_score')
+    thresholds = data.get('score_thresholds', {'pass': 80, 'warning': 60})
+    score_class = 'warn' if score is None else ('good' if score >= thresholds['pass'] else 'warn' if score >= thresholds['warning'] else 'bad')
+    score_label = 'Incomplete' if score is None else '{:g}/100'.format(score)
+    score_status = 'INCOMPLETE' if score is None else ('PASS' if score >= thresholds['pass'] else 'WARNING' if score >= thresholds['warning'] else 'FAIL')
     health = data.get("standards", {}).get("model_health", {})
     loaded_links = len([item for item in health.get("links", []) if item.get("loaded")])
     health_rows = [
         ("Workshared", "Yes" if health.get("workshared") else "No"),
+        ('Worksets / central path', '{} | {}'.format(health.get('workset_count', 'Unavailable'), health.get('central_model_path', ''))),
+        ('Sheets / views', '{} / {}'.format(health.get('sheet_count', 'Unavailable'), health.get('view_count', 'Unavailable'))),
+        ('In-place families / design options', '{} / {}'.format(health.get('in_place_family_count', 'Unavailable'), health.get('design_option_count', 'Unavailable'))),
+        ('Model groups / detail groups', '{} / {}'.format(health.get('model_group_count', 'Unavailable'), health.get('detail_group_count', 'Unavailable'))),
+        ('Placed rooms with zero area', len(health.get('unenclosed_rooms', []))),
         ("File size", "{} MB".format(health.get("file_size_mb")) if health.get("file_size_mb") is not None else "Unsaved / unavailable"),
         ("Revit links loaded", "{} / {}".format(loaded_links, len(health.get("links", [])))),
         ("Rooms / unplaced", "{} / {}".format(health.get("room_count", 0), len(health.get("unplaced_rooms", [])))),
@@ -1143,8 +889,13 @@ def export_html_dashboard(data, path):
         hard, clearance = 'Not scanned', 'Not scanned'
     warning_count = 'Not scanned' if mode == 'Clash Scan' else len(data.get('standards', {}).get('revit_warnings', []))
     elapsed = int(data.get('elapsed_seconds', 0))
-    delta_label = ('{:+}'.format(data.get('health_score_delta', 0))
-                   if data.get('previous_health_score') is not None else 'First scan for this scope')
+    delta_label = ('{:+g}'.format(data['health_score_delta']) if data.get('health_score_delta') is not None
+                   else 'No comparable complete score')
+    fresh = data.get('history_mode') == 'fresh'
+    score_note = 'Fresh scan | No previous comparison' if fresh else 'Delta: ' + delta_label
+    scan_summary = (html_table(['Warnings found', 'Clash findings', 'Previous results reused'],
+                              [(len(data.get('warnings', [])), len(clashes), 'No')]) if fresh else
+                    html_table(['New', 'Resolved', 'Unchanged'], [(trend_counts['NEW'], trend_counts['RESOLVED'], trend_counts['UNCHANGED'])]))
     if mode == 'Quick Scan':
         group_table = html_table(['Category group', 'Active-model records'],
                                 [(row[0], row[1]) for row in discipline_rows])
@@ -1160,27 +911,34 @@ def export_html_dashboard(data, path):
     categories_table = (html_table(['Revit category', 'Category key', 'Group', 'Records', 'Sample names / IDs (up to 5)'], category_rows)
                         if category_rows else 'Run a new scan to record the category breakdown.')
     source_note = ('Source: active RVT records only. Revit link instances: {} ({} loaded). '.format(
-        len(health.get('links', [])), loaded_links) if mode != 'Clash Scan' else 'Source: active RVT clash candidates only. ')
+        len(health.get('links', [])), loaded_links) if mode != 'Clash Scan' else 'Clash sources: host and configured loaded link instances. ')
     source_note += 'Groups such as Electrical are inferred from Revit categories; they do not indicate linked disciplines.'
     html = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Hamdan Audit</title><style>
 body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1d2939}}.top{{background:#111c2b;color:white;padding:28px 42px}}.top h1{{margin:0;font-size:28px}}.top p{{margin:7px 0 0;color:#b9c6d8}}.wrap{{max-width:1420px;margin:24px auto;padding:0 24px}}.grid{{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:16px}}.card,section{{background:white;border:1px solid #e4eaf2;border-radius:12px;padding:20px;box-shadow:0 3px 12px #172b4d0d}}.metric{{font-size:32px;font-weight:700;margin-top:9px}}.label{{color:#667085;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}}.good{{color:#039855}}.warn{{color:#dc6803}}.bad{{color:#d92d20}}.two{{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}}h2{{font-size:18px;margin:0 0 14px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th{{text-align:left;background:#f8fafc;color:#475467}}td,th{{padding:10px;border-bottom:1px solid #eaecf0;vertical-align:top}}.export{{display:inline-block;margin:4px 8px 4px 0;padding:9px 12px;border-radius:7px;background:#e8f1ff;color:#175cd3;text-decoration:none;font-weight:600}}.note{{font-size:12px;color:#667085;margin-top:14px}}.footer{{color:#667085;padding:25px 0;font-size:12px}}@media(max-width:850px){{.grid,.two{{grid-template-columns:1fr}}}}</style></head>
 <body><header class="top"><h1>Hamdan</h1><p>Model Health &amp; Clash Audit &middot; {model} &middot; {timestamp}</p></header><main class="wrap">
-<section style="margin-bottom:18px"><h2>{scope_label}</h2><p class="note">Elapsed: {elapsed_label}. Score and trends apply to this scan scope only. Level scans include elements crossing the selected level band. Clash-only breakdowns cover the detected candidates.</p></section>
-<div class="grid"><div class="card"><div class="label">Scan Health Score</div><div class="metric {score_class}">{score}/100</div><div class="note">Delta: {delta_label}</div></div><div class="card"><div class="label">Hard Clashes</div><div class="metric bad">{hard}</div></div><div class="card"><div class="label">Clearance Candidates</div><div class="metric warn">{clearance}</div></div><div class="card"><div class="label">Revit Warning Groups</div><div class="metric">{warnings}</div></div></div>
-<div class="two"><section><h2>Warning Trends</h2>{trend_table}</section><section><h2>Report Files</h2>{exports}<p class="note">Files for this scan. JSON stores history for the selected scope; clash scans also export CSV and BCF.</p></section></div>
+<section style="margin-bottom:18px"><h2>{scope_label}</h2><p class="note">Elapsed: {elapsed_label}. Results apply to this scan scope only. Level scans include elements crossing the selected level band. Clash-only breakdowns cover the detected candidates.</p></section>
+<section style="margin-bottom:18px"><h2>Scan Coverage</h2><p>BEP profile: {bep_profile}</p>{coverage_summary}<p class="note">Counts describe this scan scope. Geometry counters count processing events/pairs, not a percentage of the whole model. Quick Scan does not test clashes. Dimension/tag and sheet-layout checks are separate commands with their own selected scope.</p></section>
+<div class="grid"><div class="card"><div class="label">Scan Health Score</div><div class="metric {score_class}">{score_label}</div><div class="note">{score_status} | {score_note}</div></div><div class="card"><div class="label">Hard Clashes</div><div class="metric bad">{hard}</div></div><div class="card"><div class="label">Clearance Candidates</div><div class="metric warn">{clearance}</div></div><div class="card"><div class="label">Revit Warning Groups</div><div class="metric">{warnings}</div></div></div>
+<div class="two"><section><h2>{scan_heading}</h2>{trend_table}</section><section><h2>Report Files</h2>{exports}<p class="note">Files contain this scan only. Saved exports are not restored automatically in a new scan or after reopening a model; clash scans also export CSV and BCF.</p></section></div>
 <div class="two"><section><h2>Top 10 Fix First</h2>{fix_table}</section><section><h2>Active-model Category Groups</h2><p class="note">{source_note}</p>{discipline_table}</section></div>
 <div class="two"><section><h2>Model Health Inventory</h2>{health_table}</section><section><h2>Active-model Level Breakdown</h2>{level_table}</section></div>
 <section style="margin-top:18px;overflow:auto"><h2>Category Breakdown</h2><p class="note">These counts show categorized records in the current model, not linked model contents or exclusively physical objects. Samples identify what each group contains.</p>{categories_table}</section>
+<section style="margin-top:18px;overflow:auto"><h2>Clash Register</h2>{clash_table}</section>
 <section style="margin-top:18px"><h2>Required Parameter Completeness</h2>{parameter_table}</section>
-<section style="margin-top:18px;overflow:auto"><h2>Review Issues</h2><p class="note">In Revit, use Hamdan &gt; Audit &gt; Review Issues to select and zoom to an affected element. Search by severity, level, description or Element ID.</p>{issues_table}</section>
-<section style="margin-top:18px"><h2>Scan Notes</h2><p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
-<div class="footer">Generated locally by Hamdan. No cloud service or AI API was used.</div></main></body></html>""".format(
+<section id="issues" style="margin-top:18px;overflow:auto"><h2>Review Issues</h2><input id="issue-search" aria-label="Search findings" placeholder="Search severity, element name, level or ID" style="padding:10px;width:90%;margin-bottom:12px"/><p class="note">In Revit, use Hamdan &gt; Audit &gt; Review Issues to select and zoom to an affected element. Search by severity, level, description or Element ID.</p>{issues_table}</section>
+<section style="margin-top:18px"><h2>Scan Notes</h2>{checks_table}{coverage_table}{diagnostics_table}<p class="note">Hard clashes require positive solid intersection. Clearance and duplicate candidates require visual review and do not reduce the score. Unloaded links, unsupported geometry and failed checks are listed below. Closed worksets and unloaded links cannot be certified as clash-free.</p></section>
+<div class="footer">Generated locally by Hamdan. No cloud service or AI API was used.</div></main><script>
+document.getElementById('issue-search').oninput=function(){{var q=this.value.toLowerCase();document.querySelectorAll('#issues tbody tr').forEach(function(r){{r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';}});}};
+document.querySelectorAll('th').forEach(function(h){{h.style.cursor='pointer';h.onclick=function(){{
+var t=h.closest('table'),b=t.tBodies[0],i=Array.prototype.indexOf.call(h.parentNode.children,h),asc=h.dataset.asc!=='true';
+h.dataset.asc=asc;Array.from(b.rows).sort(function(a,b){{return a.cells[i].textContent.localeCompare(b.cells[i].textContent,undefined,{{numeric:true}})*(asc?1:-1);}}).forEach(function(r){{b.appendChild(r);}});}};}});
+</script></body></html>""".format(
         model=html_escape(text_type(data.get("model_name", "Untitled"))), timestamp=html_escape(text_type(data.get("timestamp", ""))),
-        score=score, score_class=score_class, delta_label=html_escape(delta_label), hard=hard,
+        score_label=score_label, score_status=score_status, score_class=score_class, score_note=html_escape(score_note), hard=hard,
         clearance=clearance, warnings=warning_count, scope_label=html_escape(scope_label),
         elapsed_label='{}m {:02d}s'.format(elapsed // 60, elapsed % 60),
-        trend_table=html_table(["New", "Resolved", "Unchanged"], [(trend_counts["NEW"], trend_counts["RESOLVED"], trend_counts["UNCHANGED"])]),
+        scan_heading='Current scan' if fresh else 'Warning Trends', trend_table=scan_summary,
         exports="".join(export_links),
         fix_table=html_table(["#", "Recommendation", "Items", "Impact", "Details"], fix_rows),
         discipline_table=group_table, level_table=by_level_table,
@@ -1192,8 +950,29 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
              len(item.get("missing", [])))
             for item in data.get("standards", {}).get("required_parameters", [])
         ]) if mode != 'Clash Scan' else 'Not included in this scan.',
-        issues_table=html_table(["Issue ID", "Severity", "Type", "Status", "Level", "Element IDs", "Element Names", "Finding", "Suggested Fix"], [
-            (item['issue_id'], item['severity'], item['kind'], item['status'], item['level'],
+        clash_table=html_table(['ID', 'Kind / evidence', 'Status', 'Model A / element', 'Model B / element', 'Approx. XYZ (host metres)', 'Clearance mm'], [
+            (c['clash_id'], c['kind'] + ' / ' + c.get('evidence', ''), c.get('status', ''),
+             '{} | {} | ID {}'.format(c['element_a'].get('model_name', ''), c['element_a'].get('display_name', ''), c['element_a'].get('linked_element_id', c['element_a'].get('id'))),
+             '{} | {} | ID {}'.format(c['element_b'].get('model_name', ''), c['element_b'].get('display_name', ''), c['element_b'].get('linked_element_id', c['element_b'].get('id'))),
+             ', '.join('{:.3f}'.format(float(v) * .3048) for v in c.get('point_internal', [])), c.get('tolerance_mm', 0)) for c in clashes
+        ]) if mode != 'Quick Scan' else 'Not included in this scan.',
+        checks_table=html_table(['Check', 'Status', 'Seconds', 'Notes'],
+            [(key, row.get('status'), row.get('seconds'), row.get('message', '')) for key, row in sorted(data.get('check_results', {}).items())]),
+        coverage_table=html_table(['Clash coverage', 'Result'], sorted(data.get('clash_coverage', {}).items())),
+        bep_profile=html_escape(data.get('bep_profile', 'Project rules')),
+        coverage_summary=html_table(['Coverage', 'Result'], [
+            ('Scope', scope_label), ('Host records inventoried', data.get('inventory_records', 'Not recorded')),
+            ('Checks completed', sum(1 for r in data.get('check_results', {}).values() if r.get('status') == 'PASS')),
+            ('Checks failed / incomplete', sum(1 for r in data.get('check_results', {}).values() if r.get('status') in ('FAILED', 'INCOMPLETE'))),
+            ('Geometry tested pairs', data.get('clash_coverage', {}).get('solid_pairs_tested', 'Not scanned')),
+            ('Geometry skipped events', data.get('clash_coverage', {}).get('skipped_geometry', 'Not scanned')),
+            ('Unloaded link instances', data.get('clash_coverage', {}).get('unloaded_links', 'Not scanned')),
+            ('Loaded links unavailable to API', data.get('clash_coverage', {}).get('unavailable_link_documents', 'Not scanned'))]),
+        diagnostics_table=html_table(['Kind', 'Element', 'Notes'],
+            [(r.get('type'), r.get('element_id', ''), r.get('message', '')) for r in data.get('scan_diagnostics', [])]),
+        issues_table=html_table(["Issue ID", "Severity", "Type", "Detected", "Workflow", "Assignee", "Due", "Reason", "Level", "Element IDs", "Element Names", "Finding", "Suggested Fix"], [
+            (item['issue_id'], item['severity'], item['kind'], item['status'], item.get('workflow_status', item['status']),
+             item.get('assignee', ''), item.get('due_date', ''), item.get('reason', ''), item['level'],
              ', '.join(str(value) for value in item['element_ids']),
              ' / '.join(ref.get('display_name') or ref.get('name', '') for ref in item.get('element_refs', [])),
              item['message'], item['suggested_fix'])
@@ -1202,581 +981,6 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
     )
     with io.open(path, "w", encoding="utf-8") as html_file:
         html_file.write(html)
-
-
-def print_report(data):
-    print("## Model Health & Clash Audit")
-    print("**Model:** {}  ".format(data["model_name"]))
-    print("**Timestamp:** {}  ".format(data["timestamp"]))
-    print("**Health Score:** {}/100 (delta: {:+})".format(data["health_score"], data.get("health_score_delta", 0)))
-    print("")
-    print("### Clash summary")
-    print("- Hard clashes: {}".format(sum(1 for c in data["clashes"] if c["kind"] == "Hard")))
-    print("- Clearance clashes: {}".format(sum(1 for c in data["clashes"] if c["kind"] == "Clearance")))
-    print("- Warnings trend: NEW {}, RESOLVED {}, UNCHANGED {}".format(
-        sum(1 for w in data["warning_trends"] if w["trend"] == "NEW"),
-        sum(1 for w in data["warning_trends"] if w["trend"] == "RESOLVED"),
-        sum(1 for w in data["warning_trends"] if w["trend"] == "UNCHANGED")))
-    print("- Native Revit warning groups: {}".format(len(data["standards"].get("revit_warnings", []))))
-    print("")
-    print("### Top 10 — Fix first")
-    for i, item in enumerate(data["fix_first"], 1):
-        print("{}. **{}** — estimated impact {} points; {} item(s). {}".format(
-            i, item["title"], item["impact"], item["count"], item["details"]))
-    print("")
-    print("### Required parameter completeness")
-    for item in data["standards"]["required_parameters"]:
-        print("- **{}**: {}% filled across {} element(s); {} missing value(s)".format(
-            item["category"], item["filled_percent"], item["element_count"], len(item["missing"])))
-    print("")
-    print("### Per-discipline breakdown")
-    for name, row in sorted(data["breakdowns"]["per_discipline"].items()):
-        print("- **{}**: {} elements, {} hard clashes, {} clearance clashes".format(
-            name, row["elements"], row["hard_clashes"], row["clearance_clashes"]))
-    print("")
-    print("### Per-level breakdown")
-    for name, row in sorted(data["breakdowns"]["per_level"].items()):
-        print("- **{}**: {} elements, {} hard clashes, {} clearance clashes".format(
-            name, row["elements"], row["hard_clashes"], row["clearance_clashes"]))
-    print("")
-    print("### Exports")
-    for key, value in data["exports"].items():
-        print("- **{}:** `{}`".format(key, value))
-
-
-
-# ---------------------------------------------------------------------------
-# MEP GENERATION EXTENSION — Existing-model workflow
-# ---------------------------------------------------------------------------
-# This extension creates preliminary Revit Pipe and Conduit elements where suitable
-# Revit types/system types exist. It intentionally does not fabricate fixtures:
-# load/position suitable families first, or enable configured fixture placement.
-# Pipe/conduit runs are routed as orthogonal segments; fittings and engineered
-# calculations must be reviewed by a qualified BIM/MEP professional.
-
-MEP_DEFAULTS = {
-    "enable_pipe_generation": True,
-    "enable_conduit_generation": True,
-    "enable_fixture_placement": False,
-    "route_existing_plumbing_fixtures": True,
-    "route_existing_electrical_devices": True,
-    "supply_system_type_contains": ["Domestic", "Cold Water", "Potable"],
-    "drain_system_type_contains": ["Sanitary", "Domestic", "Waste"],
-    "electrical_panel_name_contains": ["Panel", "DB", "MDB"],
-    "supply_pipe_type_contains": ["Domestic", "Water"],
-    "drain_pipe_type_contains": ["Sanitary", "Waste", "Drain"],
-    "conduit_type_contains": ["Conduit", "Electrical"],
-    "supply_diameter_mm": 20,
-    "drain_diameter_mm": 75,
-    "conduit_diameter_mm": 20,
-    "horizontal_route_offset_mm": 300,
-    "minimum_route_length_mm": 150,
-    "fixture_categories": [
-        "OST_PlumbingFixtures", "OST_Sprinklers", "OST_MechanicalEquipment"
-    ],
-    "electrical_device_categories": [
-        "OST_LightingFixtures", "OST_ElectricalFixtures", "OST_ElectricalEquipment"
-    ],
-    "notes": "Use actual loaded pipe/conduit/system types; verify all routes and connections."
-}
-
-
-def merge_mep_config():
-    try:
-        path = os.path.join(REPORT_DIR, "mep_config.json")
-        if not os.path.exists(path):
-            with open_text_compat(path, "w") as f:
-                json.dump(MEP_DEFAULTS, f, indent=2)
-            return dict(MEP_DEFAULTS)
-        with open_text_compat(path, "r") as f:
-            user = json.load(f)
-        merged = dict(MEP_DEFAULTS)
-        merged.update(user)
-        return merged
-    except Exception:
-        return dict(MEP_DEFAULTS)
-
-
-MEP_CONFIG = merge_mep_config()
-
-
-def _revit_api_class(name):
-    # Revit API places MEP classes in nested namespaces in many Revit versions.
-    import Autodesk.Revit.DB as DB
-    if "." in name:
-        current = DB
-        for part in name.split("."):
-            current = getattr(current, part, None)
-            if current is None:
-                return None
-        return current
-    found = getattr(DB, name, None)
-    if found is not None:
-        return found
-    for namespace_name in ("Plumbing", "Electrical", "Structure", "Architecture"):
-        namespace = getattr(DB, namespace_name, None)
-        if namespace is not None:
-            found = getattr(namespace, name, None)
-            if found is not None:
-                return found
-    return None
-
-
-def _type_name(el):
-    try:
-        return el.Name or ""
-    except Exception:
-        return ""
-
-
-def _contains_any(value, candidates):
-    value = (value or "").lower()
-    return any((candidate or "").lower() in value for candidate in (candidates or []))
-
-
-def _collect_class(class_name):
-    cls = _revit_api_class(class_name)
-    if cls is None:
-        return []
-    try:
-        return list(FilteredElementCollector(doc).OfClass(cls).ToElements())
-    except Exception:
-        return []
-
-
-def _find_named_type(class_name, candidates):
-    items = _collect_class(class_name)
-    for item in items:
-        if _contains_any(_type_name(item), candidates):
-            return item
-    return items[0] if items else None
-
-
-def _level_for_element(el):
-    try:
-        lid = el.LevelId
-        level = doc.GetElement(lid)
-        if isinstance(level, Level):
-            return level
-    except Exception:
-        pass
-    try:
-        p = el.LookupParameter("Reference Level") or el.LookupParameter("Level")
-        if p and p.StorageType.ToString() == "ElementId":
-            level = doc.GetElement(p.AsElementId())
-            if isinstance(level, Level):
-                return level
-    except Exception:
-        pass
-    levels = sorted(_collect_class("Level"), key=lambda x: x.Elevation)
-    return levels[0] if levels else None
-
-
-def _element_point(el):
-    try:
-        loc = el.Location
-        point = getattr(loc, "Point", None)
-        if point:
-            return point
-        curve = getattr(loc, "Curve", None)
-        if curve:
-            return curve.Evaluate(0.5, True)
-    except Exception:
-        pass
-    box = get_bbox(el)
-    if box:
-        return XYZ((box[0]+box[3])/2, (box[1]+box[4])/2, (box[2]+box[5])/2)
-    return None
-
-
-def _get_connectors(el):
-    result = []
-    try:
-        mep = getattr(el, "MEPModel", None)
-        manager = mep.ConnectorManager if mep else None
-        if manager:
-            for connector in manager.Connectors:
-                try:
-                    if connector.ConnectorType.ToString() in ("End", "Curve", "Physical"):
-                        result.append(connector)
-                except Exception:
-                    result.append(connector)
-    except Exception:
-        pass
-    try:
-        manager = getattr(el, "ConnectorManager", None)
-        if manager:
-            for connector in manager.Connectors:
-                result.append(connector)
-    except Exception:
-        pass
-    return result
-
-
-def _get_builtin_category_ids(names):
-    result = set()
-    for name in names:
-        try:
-            bic = getattr(BuiltInCategory, name)
-            result.add(int(bic))
-        except Exception:
-            pass
-    return result
-
-
-def _elements_in_categories(category_names):
-    ids = _get_builtin_category_ids(category_names)
-    found = []
-    for el in FilteredElementCollector(doc).WhereElementIsNotElementType():
-        try:
-            if el.Category and int(el.Category.Id.Value) in ids:
-                found.append(el)
-                continue
-        except Exception:
-            try:
-                if el.Category and int(el.Category.Id.IntegerValue) in ids:
-                    found.append(el)
-            except Exception:
-                pass
-    return found
-
-
-def _all_elements_matching_category_tokens(tokens):
-    out = []
-    seen = set()
-    for el in FilteredElementCollector(doc).WhereElementIsNotElementType():
-        try:
-            cat = category_bic_name(el) or ""
-            cat_name = category_key(el) or ""
-            combined = (cat + " " + cat_name).lower()
-            if any((token or "").lower() in combined for token in tokens):
-                eid = element_id_value(el.Id)
-                if eid not in seen:
-                    out.append(el)
-                    seen.add(eid)
-        except Exception:
-            pass
-    return out
-
-
-def _distance(a, b):
-    try:
-        return a.DistanceTo(b)
-    except Exception:
-        return 1e99
-
-
-def _orthogonal_points(start, end, offset_internal):
-    # Stable Manhattan path: vertical to working elevation, XY turn, then endpoint.
-    # The middle elevation is chosen above the lower endpoint for service routing.
-    z = max(start.Z, end.Z) + offset_internal
-    p1 = XYZ(start.X, start.Y, z)
-    p2 = XYZ(end.X, start.Y, z)
-    p3 = XYZ(end.X, end.Y, z)
-    pts = [start, p1, p2, p3, end]
-    compact = []
-    for p in pts:
-        if not compact or _distance(compact[-1], p) > mm_to_internal(1):
-            compact.append(p)
-    return compact
-
-
-def _create_pipe_segment(system_type, pipe_type, level, start, end, diameter_mm, created_ids, log):
-    import Autodesk.Revit.DB as DB
-    if _distance(start, end) < mm_to_internal(MEP_CONFIG.get("minimum_route_length_mm", 150)):
-        return
-    try:
-        pipe = DB.Plumbing.Pipe.Create(doc, system_type.Id, pipe_type.Id, level.Id, start, end)
-        try:
-            p = pipe.get_Parameter(BuiltInParameter.RBS_PIPE_DIAMETER_PARAM)
-            if p and not p.IsReadOnly:
-                p.Set(mm_to_internal(diameter_mm))
-        except Exception:
-            pass
-        created_ids.append(element_id_value(pipe.Id))
-    except Exception as ex:
-        log.append("Pipe segment failed: {}".format(ex))
-
-
-def _create_conduit_segment(conduit_type, level, start, end, diameter_mm, created_ids, log):
-    import Autodesk.Revit.DB as DB
-    if _distance(start, end) < mm_to_internal(MEP_CONFIG.get("minimum_route_length_mm", 150)):
-        return
-    try:
-        conduit = DB.Electrical.Conduit.Create(doc, conduit_type.Id, start, end, level.Id)
-        try:
-            p = conduit.get_Parameter(BuiltInParameter.RBS_CONDUIT_DIAMETER_PARAM)
-            if p and not p.IsReadOnly:
-                p.Set(mm_to_internal(diameter_mm))
-        except Exception:
-            pass
-        created_ids.append(element_id_value(conduit.Id))
-    except Exception as ex:
-        log.append("Conduit segment failed: {}".format(ex))
-
-
-def _route_to_nearest_anchor(device, anchors, system_type, pipe_type, level, diameter_mm,
-                             route_offset_mm, created_ids, log, is_conduit=False):
-    start = _element_point(device)
-    if start is None or not anchors:
-        return False
-    anchor = min(anchors, key=lambda item: _distance(start, item[0]))
-    end, anchor_level = anchor
-    use_level = level or anchor_level
-    if use_level is None:
-        return False
-    pts = _orthogonal_points(start, end, mm_to_internal(route_offset_mm))
-    for i in range(len(pts)-1):
-        if is_conduit:
-            _create_conduit_segment(pipe_type, use_level, pts[i], pts[i+1], diameter_mm, created_ids, log)
-        else:
-            _create_pipe_segment(system_type, pipe_type, use_level, pts[i], pts[i+1], diameter_mm, created_ids, log)
-    return True
-
-
-def _existing_mep_anchor_points(category_tokens):
-    anchors = []
-    for el in _all_elements_matching_category_tokens(category_tokens):
-        point = _element_point(el)
-        level = _level_for_element(el)
-        if point is not None and level is not None:
-            anchors.append((point, level, el))
-    return anchors
-
-
-def _discover_mep_types():
-    return {
-        "pipe_types": _collect_class("Plumbing.PipeType") or _collect_class("PipeType"),
-        "piping_system_types": _collect_class("Plumbing.PipingSystemType") or _collect_class("PipingSystemType"),
-        "conduit_types": _collect_class("Electrical.ConduitType") or _collect_class("ConduitType"),
-        "electrical_system_types": _collect_class("Electrical.ElectricalSystemType") or _collect_class("ElectricalSystemType"),
-        "family_symbols": _collect_class("FamilySymbol")
-    }
-
-
-def _summary_type_names(items):
-    return sorted(set(_type_name(x) for x in items if _type_name(x)))
-
-
-def run_mep_generation():
-    """Generate pipe/conduit route segments from existing model devices and log all omissions."""
-    report = {"created_pipe_ids": [], "created_conduit_ids": [], "warnings": [], "available_types": {}}
-    types = _discover_mep_types()
-    report["available_types"] = {
-        "pipe_types": _summary_type_names(types["pipe_types"]),
-        "piping_system_types": _summary_type_names(types["piping_system_types"]),
-        "conduit_types": _summary_type_names(types["conduit_types"]),
-        "electrical_system_types": _summary_type_names(types["electrical_system_types"])
-    }
-
-    supply_system = next((x for x in types["piping_system_types"]
-                          if _contains_any(_type_name(x), MEP_CONFIG.get("supply_system_type_contains", []))), None)
-    drain_system = next((x for x in types["piping_system_types"]
-                         if _contains_any(_type_name(x), MEP_CONFIG.get("drain_system_type_contains", []))), None)
-    supply_pipe = next((x for x in types["pipe_types"]
-                        if _contains_any(_type_name(x), MEP_CONFIG.get("supply_pipe_type_contains", []))), None)
-    drain_pipe = next((x for x in types["pipe_types"]
-                       if _contains_any(_type_name(x), MEP_CONFIG.get("drain_pipe_type_contains", []))), None)
-    conduit_type = next((x for x in types["conduit_types"]
-                         if _contains_any(_type_name(x), MEP_CONFIG.get("conduit_type_contains", []))), None)
-    # Never substitute an arbitrary system type: water and sanitary systems
-    # are not interchangeable. Require explicitly matching system names.
-    if not supply_system:
-        log.append("Domestic-water system type not matched. Load/select a correct Domestic Cold Water system.")
-    if not drain_system:
-        log.append("Sanitary system type not matched. Load/select a correct Sanitary system.")
-    if not supply_pipe:
-        log.append("Domestic-water pipe type not matched; check type names in mep_config.json.")
-    if not drain_pipe:
-        log.append("Sanitary pipe type not matched; check type names in mep_config.json.")
-    if not conduit_type:
-        log.append("Conduit type not matched; load a conduit type or update mep_config.json.")
-
-    plumbing_devices = _all_elements_matching_category_tokens(
-        ("OST_PlumbingFixtures", "plumbing fixture"))
-    electrical_devices = _all_elements_matching_category_tokens(
-        ("OST_LightingFixtures", "OST_ElectricalFixtures",
-         "lighting fixture", "electrical fixture"))
-    pipe_anchors = _existing_mep_anchor_points(
-        ("OST_PlumbingFixtures", "OST_MechanicalEquipment", "plumbing fixture", "mechanical equipment"))
-    panel_anchors = _existing_mep_anchor_points(
-        ("OST_ElectricalEquipment", "electrical equipment"))
-    pipe_created, conduit_created, log = [], [], []
-
-    if MEP_CONFIG.get("enable_pipe_generation", True):
-        if not supply_system or not supply_pipe:
-            log.append("Domestic water routing skipped: matching PipingSystemType/PipeType not found. Review mep_config.json.")
-        elif not plumbing_devices:
-            log.append("No existing plumbing fixtures/equipment found. Load and place plumbing families first.")
-        else:
-            # Use connectors when available; device location fallback is for route geometry only.
-            for device in plumbing_devices:
-                level = _level_for_element(device)
-                point = _element_point(device)
-                if point is None or level is None:
-                    log.append("Skipped plumbing element {}: no usable point/level.".format(element_id_value(device.Id)))
-                    continue
-                # Anchor route geometry to nearest existing fixture/equipment; the generated run
-                # is a starter route and does not claim connector/fitting connectivity.
-                anchors = [(p, lv) for p, lv, _ in pipe_anchors if element_id_value(_.Id) != element_id_value(device.Id)]
-                if not anchors:
-                    anchors = [(XYZ(point.X + mm_to_internal(1500), point.Y, point.Z), level)]
-                _route_to_nearest_anchor(device, anchors, supply_system, supply_pipe, level,
-                    MEP_CONFIG.get("supply_diameter_mm", 20),
-                    MEP_CONFIG.get("horizontal_route_offset_mm", 300), pipe_created, log, False)
-
-        if not drain_system or not drain_pipe:
-            log.append("Drainage routing skipped: matching sanitary PipingSystemType/PipeType not found. Review mep_config.json.")
-        elif not plumbing_devices:
-            log.append("No plumbing fixtures found for drainage routing.")
-        else:
-            for device in plumbing_devices:
-                level = _level_for_element(device)
-                point = _element_point(device)
-                if point is None or level is None:
-                    continue
-                anchors = [(p, lv) for p, lv, other in pipe_anchors
-                           if element_id_value(other.Id) != element_id_value(device.Id)]
-                if not anchors:
-                    anchors = [(XYZ(point.X + mm_to_internal(1200), point.Y, point.Z - mm_to_internal(300)), level)]
-                _route_to_nearest_anchor(device, anchors, drain_system, drain_pipe, level,
-                    MEP_CONFIG.get("drain_diameter_mm", 75),
-                    -abs(MEP_CONFIG.get("horizontal_route_offset_mm", 300)), pipe_created, log, False)
-
-    if MEP_CONFIG.get("enable_conduit_generation", True):
-        if not conduit_type:
-            log.append("Conduit routing skipped: no matching ConduitType found. Review mep_config.json.")
-        elif not electrical_devices:
-            log.append("No existing lights/outlets/electrical equipment found. Load and place families first.")
-        else:
-            anchors = [(p, lv) for p, lv, _ in panel_anchors]
-            if not anchors:
-                log.append("No electrical panel/equipment anchor found; electrical device routing skipped.")
-            else:
-                for device in electrical_devices:
-                    level = _level_for_element(device)
-                    if level is None:
-                        continue
-                    _route_to_nearest_anchor(device, anchors, None, conduit_type, level,
-                        MEP_CONFIG.get("conduit_diameter_mm", 20),
-                        MEP_CONFIG.get("horizontal_route_offset_mm", 300), conduit_created, log, True)
-
-    report["created_pipe_ids"] = pipe_created
-    report["created_conduit_ids"] = conduit_created
-    report["warnings"] = log
-    report["counts"] = {
-        "plumbing_devices_found": len(plumbing_devices),
-        "electrical_devices_found": len(electrical_devices),
-        "pipe_segments_created": len(pipe_created),
-        "conduit_segments_created": len(conduit_created),
-        "pipe_types_found": len(types["pipe_types"]),
-        "piping_system_types_found": len(types["piping_system_types"]),
-        "conduit_types_found": len(types["conduit_types"]),
-        "electrical_system_types_found": len(types["electrical_system_types"]),
-        "family_symbols_loaded": len(types["family_symbols"])
-    }
-    report["device_category_counts"] = {}
-    for el in FilteredElementCollector(doc).WhereElementIsNotElementType():
-        try:
-            catname = category_bic_name(el) or category_key(el) or "Unknown"
-            if any(token in catname.lower() for token in ("plumbing", "fixture", "electrical", "lighting", "mechanical", "sprinkler")):
-                report["device_category_counts"][catname] = report["device_category_counts"].get(catname, 0) + 1
-        except Exception:
-            pass
-    return report
-
-
-def write_mep_generation_report(report):
-    path = os.path.join(REPORT_DIR, "mep_generation_{}.json".format(datetime.now().strftime("%Y%m%d_%H%M%S")))
-    with open_text_compat(path, "w") as f:
-        json.dump(report, f, indent=2, ensure_ascii=True, default=str)
-    return path
-
-
-def print_mep_generation_report(report, path):
-    print("")
-    print("### MEP generation")
-    print("- Existing plumbing devices found: {}".format(report.get("counts", {}).get("plumbing_devices_found", 0)))
-    print("- Existing electrical devices found: {}".format(report.get("counts", {}).get("electrical_devices_found", 0)))
-    print("- Pipe segments created: {}".format(report.get("counts", {}).get("pipe_segments_created", 0)))
-    print("- Conduit segments created: {}".format(report.get("counts", {}).get("conduit_segments_created", 0)))
-    print("- Pipe types found: {}".format(report.get("counts", {}).get("pipe_types_found", 0)))
-    print("- Piping system types found: {}".format(report.get("counts", {}).get("piping_system_types_found", 0)))
-    print("- Conduit types found: {}".format(report.get("counts", {}).get("conduit_types_found", 0)))
-    print("- Loaded family symbols: {}".format(report.get("counts", {}).get("family_symbols_loaded", 0)))
-    print("- Device category counts: {}".format(report.get("device_category_counts", {})))
-    print("- MEP report: `{}`".format(path))
-    for warning in report.get("warnings", []):
-        print("- **Review:** {}".format(warning))
-
-
-def run_mep_generation_with_transaction():
-    import Autodesk.Revit.DB as DB
-    if not forms.alert(
-        "Create starter plumbing pipe and electrical conduit routes from existing model devices?\n\n"
-        "This creates model elements in the active RVT. It does NOT automatically create fixtures, "
-        "fittings, circuits, engineered sizing, or verified connector connections. Review routes before issue.",
-        title="MEP Generation — Confirm",
-        yes=True, no=True
-    ):
-        return None
-    report = None
-    # Preview source categories before entering a write transaction.
-    plumbing_count = len(_all_elements_matching_category_tokens(
-        ("OST_PlumbingFixtures", "plumbing fixture")))
-    electrical_count = len(_all_elements_matching_category_tokens(
-        ("OST_LightingFixtures", "OST_ElectricalFixtures", "lighting fixture", "electrical fixture")))
-    if plumbing_count == 0 and electrical_count == 0:
-        report = {
-            "created_pipe_ids": [], "created_conduit_ids": [],
-            "counts": {"plumbing_devices_found": 0, "electrical_devices_found": 0,
-                       "pipe_segments_created": 0, "conduit_segments_created": 0},
-            "warnings": [
-                "No placed plumbing fixtures, lights or electrical fixtures detected.",
-                "Load and PLACE suitable connector-enabled families on Ground and Second Floor.",
-                "Run again after verifying Pipe Types, Piping System Types and Conduit Types."
-            ]
-        }
-        report_path = write_mep_generation_report(report)
-        print_mep_generation_report(report, report_path)
-        forms.alert("No placed MEP fixtures detected. No model elements were changed.\\n"
-                    "See report: {}".format(report_path), title="MEP Setup Required")
-        return report
-    tx = DB.Transaction(doc, "Hamdan — MEP Routes")
-    try:
-        tx.Start()
-        report = run_mep_generation()
-        tx.Commit()
-    except Exception:
-        try:
-            if tx.HasStarted():
-                tx.RollBack()
-        except Exception:
-            pass
-        raise
-    report_path = write_mep_generation_report(report)
-    print_mep_generation_report(report, report_path)
-    forms.alert(
-        "MEP routing attempt finished.\n\nPipe segments: {}\nConduit segments: {}\n\n"
-        "Check warnings in the output and report:\n{}".format(
-            len(report.get("created_pipe_ids", [])),
-            len(report.get("created_conduit_ids", [])), report_path),
-        title="MEP Generation Complete"
-    )
-    return report
-
-
-def print_required_mep_setup():
-    print("")
-    print("### Required Revit setup for MEP generation")
-    print("- **Pipe Types:** domestic water and sanitary/waste pipe types.")
-    print("- **Piping System Types:** domestic/cold-water supply and sanitary/waste systems.")
-    print("- **Conduit Types:** at least one electrical conduit type.")
-    print("- **Existing placed families:** Plumbing Fixtures (WC, lavatory, sink, shower as applicable), Lighting Fixtures, Electrical Fixtures (outlets/switches), and Electrical Equipment (panel board).")
-    print("- **Levels:** ground-floor and second-floor Levels must exist and be assigned to elements.")
-    print("- **Recommended connectors:** MEP connectors configured correctly in each family; hosted families must be placed on valid hosts.")
-    print("- **Important:** this version generates preliminary geometric pipe/conduit segments from existing devices. It does not create elbows/tees, auto-connect fittings, electrical circuits, cable/wire, calculations, fixture placements, or certified code-compliant designs.")
-    print("- **Configuration:** `{}`".format(os.path.join(REPORT_DIR, "mep_config.json")))
 
 
 def choose_scan():
@@ -1827,7 +1031,11 @@ def choose_scan():
 
 
 def run_selected_scan(config, scope):
+    identity = begin_scan(doc)
     mode = scope['mode']
+    CHECK_RESULTS.clear()
+    SCAN_DIAGNOSTICS[:] = []
+    CLASH_COVERAGE.clear()
     scan_tick('Reading model', 0, 1)
     elements = all_model_elements() if mode != 'Clash Scan' else []
     clashes = detect_clashes(config, scope['level_band_internal']) if mode != 'Quick Scan' else []
@@ -1840,38 +1048,41 @@ def run_selected_scan(config, scope):
     scan_tick('Preparing findings', 0, 1)
     timestamp = now_iso()
     model_name = doc.Title or 'Untitled'
-    doc_key = '{}|{}'.format(model_name, getattr(doc, 'PathName', '') or 'unsaved')
+    doc_key = identity_key(identity)
     run_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     base = 'audit_{}_{}'.format(safe_name(model_name), run_id)
     json_path = os.path.join(REPORT_DIR, base + '.json')
     csv_path = os.path.join(REPORT_DIR, base + '_clashes.csv')
     bcf_path = os.path.join(REPORT_DIR, base + '_clashes.bcf')
     html_path = os.path.join(REPORT_DIR, base + '.html')
-    previous = load_previous_audit(doc_key, scope)
-    previous_clashes = dict((c['clash_id'], c) for c in (previous or {}).get('clashes', []))
-    for clash in clashes:
-        old = previous_clashes.get(clash['clash_id'])
-        clash['status'] = 'Approved' if old and old.get('status') == 'Approved' else ('Active' if old else 'New')
-    current_ids = set(c['clash_id'] for c in clashes)
-    resolved = [dict(old, status='Resolved') for key, old in previous_clashes.items() if key not in current_ids]
+    resolved = clash_history(clashes, None, CLASH_COVERAGE.get('complete', True))
+    register = {'issues': {}}
+    complete = not any(r.get('status') in ('FAILED', 'INCOMPLETE') for r in CHECK_RESULTS.values())
     warnings = flatten_warnings(clashes, standards)
     score = health_score(clashes, standards, config)
-    old_score = previous.get('health_score') if previous else None
+    old_score = None
     data = {
-        'schema_version': '2.1', 'timestamp': timestamp,
+        'schema_version': '3.3', 'history_mode': 'fresh', 'baseline_applied': False,
+        'timestamp': timestamp, 'bep_profile': config.get('bep_profile', 'Project rules'),
+        'inventory_records': len(elements) if mode != 'Clash Scan' else 'Not inventoried (clash-only scan)',
         'user': os.environ.get('USERNAME') or 'unknown', 'model_name': model_name,
         'document_key': doc_key, 'scan_scope': scope,
+        'check_results': dict(CHECK_RESULTS), 'clash_coverage': dict(CLASH_COVERAGE),
+        'scan_diagnostics': list(SCAN_DIAGNOSTICS),
+        'score_thresholds': config.get('score_thresholds', {'pass': 80, 'warning': 60}),
+        'audit_complete': complete,
         'health_score': score, 'previous_health_score': old_score,
-        'health_score_delta': score - old_score if old_score is not None else 0,
+        'health_score_delta': score - old_score if old_score is not None and score is not None else None,
         'clashes': clashes, 'resolved_clashes': resolved, 'standards': standards,
-        'warnings': warnings, 'warning_trends': compare_history(warnings, previous),
+        'warnings': warnings, 'warning_trends': [],
         'fix_first': fix_first(clashes, standards, config),
         'breakdowns': breakdown_tables(elements, clashes), 'config_path': CONFIG_PATH,
-        'exports': {'HTML dashboard': html_path, 'JSON history': json_path}
+        'exports': {'HTML dashboard': html_path, 'JSON results': json_path}
     }
     scan_tick('Preparing issue register', 0, 1)
-    data['review_model_identity'] = model_identity(doc, Process.GetCurrentProcess().Id)
+    data['review_model_identity'] = identity
     data['review_issues'] = attach_references(build_issues(data), describe_review_element)
+    overlay_issues(data['review_issues'], register)
     if mode != 'Quick Scan':
         scan_tick('Exporting clash CSV', 0, 1)
         export_clashes_csv(clashes, csv_path)
@@ -1881,16 +1092,22 @@ def run_selected_scan(config, scope):
     scan_tick('Saving dashboard', 0, 1)
     data['elapsed_seconds'] = round(SCAN_PROGRESS.clock() - SCAN_PROGRESS.started, 2) if SCAN_PROGRESS else 0
     export_html_dashboard(data, html_path)
-    # Save history last: a cancelled/failed run must never become a completed baseline.
+    # Publish only after every report file succeeds; failed/cancelled scans stay fresh.
     with open_text_compat(json_path, 'w') as handle:
         json.dump(data, handle, indent=2, ensure_ascii=True, default=str)
+    publish_scan(doc, identity, json_path)
     return html_path
 
 
 def main():
-    global SCAN_PROGRESS
+    global SCAN_PROGRESS, CONFIG
     if doc is None or doc.IsFamilyDocument:
         forms.alert('Open a Revit project before scanning.', title='Hamdan', warn_icon=False)
+        return
+    try:
+        CONFIG = load_config()
+    except Exception as error:
+        forms.alert('BEP configuration could not be loaded. Correct the profile before scanning.\n\n{}'.format(error), title='Hamdan', warn_icon=False)
         return
     selection = choose_scan()
     if selection is None:
