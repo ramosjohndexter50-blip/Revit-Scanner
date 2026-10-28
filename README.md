@@ -1,4 +1,4 @@
-# Revit Scanner
+# Hamdan
 
 A standalone, scan-only pyRevit extension for model-health and clash auditing.
 
@@ -24,7 +24,7 @@ The audit is read-only: it creates reports but never adds, edits, or deletes Rev
 
 3. Leave the install path at pyRevit's default, then choose **Add and install**.
 4. Reload pyRevit or restart Revit.
-5. Open **Revit Scanner > Audit > Model Health & Clash Audit**.
+5. Open **Hamdan > Audit > Run Audit**.
 
 ## Reports and configuration
 

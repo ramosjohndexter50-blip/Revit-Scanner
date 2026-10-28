@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Revit Scanner — Model Health & Clash Audit (v2)
+Hamdan — Model Health & Clash Audit (v2)
 Target: pyRevit IronPython 2.7-compatible syntax, Revit API (verify against installed Revit version)
 Purpose: audit the active Revit model and export JSON history, CSV clashes,
 BCF 2.1 viewpoints, standards checks, health score, and prioritized fixes.
@@ -1001,7 +1001,7 @@ def export_bcf21(clashes, path, project_name):
             topic = ET.SubElement(root, "Topic", {
                 "Guid": topic_guid, "TopicType": "Clash", "TopicStatus": c.get("status", "Active"),
                 "Title": c["message"][:200], "Priority": "Normal", "Index": str(len(topic_list) + 1),
-                "CreationDate": now_iso(), "CreationAuthor": "Revit Scanner"
+                "CreationDate": now_iso(), "CreationAuthor": "Hamdan"
             })
             ET.SubElement(topic, "Description").text = c["message"]
             viewpoint_guid = bcf_guid(uuid.uuid5(uuid.NAMESPACE_URL, c["clash_id"] + ":viewpoint"))
@@ -1102,16 +1102,16 @@ def export_html_dashboard(data, path):
         ("Imported CAD / linked CAD", "{} / {}".format(health.get("imported_cad_count", 0), health.get("linked_cad_count", 0)))
     ]
     html = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Revit Scanner Audit</title><style>
+<html><head><meta charset="utf-8"><title>Hamdan Audit</title><style>
 body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1d2939}}.top{{background:#111c2b;color:white;padding:28px 42px}}.top h1{{margin:0;font-size:28px}}.top p{{margin:7px 0 0;color:#b9c6d8}}.wrap{{max-width:1420px;margin:24px auto;padding:0 24px}}.grid{{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:16px}}.card,section{{background:white;border:1px solid #e4eaf2;border-radius:12px;padding:20px;box-shadow:0 3px 12px #172b4d0d}}.metric{{font-size:32px;font-weight:700;margin-top:9px}}.label{{color:#667085;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}}.good{{color:#039855}}.warn{{color:#dc6803}}.bad{{color:#d92d20}}.two{{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}}h2{{font-size:18px;margin:0 0 14px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th{{text-align:left;background:#f8fafc;color:#475467}}td,th{{padding:10px;border-bottom:1px solid #eaecf0;vertical-align:top}}.export{{display:inline-block;margin:4px 8px 4px 0;padding:9px 12px;border-radius:7px;background:#e8f1ff;color:#175cd3;text-decoration:none;font-weight:600}}.note{{font-size:12px;color:#667085;margin-top:14px}}.footer{{color:#667085;padding:25px 0;font-size:12px}}@media(max-width:850px){{.grid,.two{{grid-template-columns:1fr}}}}</style></head>
-<body><header class="top"><h1>Revit Scanner</h1><p>Model Health &amp; Clash Audit &middot; {model} &middot; {timestamp}</p></header><main class="wrap">
+<body><header class="top"><h1>Hamdan</h1><p>Model Health &amp; Clash Audit &middot; {model} &middot; {timestamp}</p></header><main class="wrap">
 <div class="grid"><div class="card"><div class="label">Health Score</div><div class="metric {score_class}">{score}/100</div><div class="note">Delta: {delta:+}</div></div><div class="card"><div class="label">Hard Clashes</div><div class="metric bad">{hard}</div></div><div class="card"><div class="label">Clearance Candidates</div><div class="metric warn">{clearance}</div></div><div class="card"><div class="label">Revit Warning Groups</div><div class="metric">{warnings}</div></div></div>
 <div class="two"><section><h2>Warning Trends</h2>{trend_table}</section><section><h2>Report Files</h2>{exports}<p class="note">JSON keeps local audit history. CSV and BCF are available for coordination workflows.</p></section></div>
 <div class="two"><section><h2>Top 10 Fix First</h2>{fix_table}</section><section><h2>Clashes by Discipline</h2>{discipline_table}</section></div>
 <div class="two"><section><h2>Model Health Inventory</h2>{health_table}</section><section><h2>Clashes by Level</h2>{level_table}</section></div>
 <section style="margin-top:18px"><h2>Required Parameter Completeness</h2>{parameter_table}</section>
 <section style="margin-top:18px"><h2>Scan Notes</h2><p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
-<div class="footer">Generated locally by Revit Scanner. No cloud service or AI API was used.</div></main></body></html>""".format(
+<div class="footer">Generated locally by Hamdan. No cloud service or AI API was used.</div></main></body></html>""".format(
         model=html_escape(str(data.get("model_name", "Untitled"))), timestamp=html_escape(str(data.get("timestamp", ""))),
         score=score, score_class=score_class, delta=data.get("health_score_delta", 0), hard=hard,
         clearance=clearance, warnings=len(data.get("standards", {}).get("revit_warnings", [])),
@@ -1670,7 +1670,7 @@ def run_mep_generation_with_transaction():
         forms.alert("No placed MEP fixtures detected. No model elements were changed.\\n"
                     "See report: {}".format(report_path), title="MEP Setup Required")
         return report
-    tx = DB.Transaction(doc, "Revit Scanner — MEP Routes")
+    tx = DB.Transaction(doc, "Hamdan — MEP Routes")
     try:
         tx.Start()
         report = run_mep_generation()
@@ -1712,9 +1712,8 @@ def main():
         forms.alert("Open a Revit project before running this script.", title="BIM Audit")
         return
     if not forms.alert(
-            "Run a read-only full-model health and clash audit?\n\n"
-            "This creates JSON, CSV, and BCF reports but does not change the Revit model.",
-            title="Model Health & Clash Audit", yes=True, no=True):
+            "Start scanning the current model?",
+            title="Hamdan", yes=True, no=True, warn_icon=False):
         return
 
     timestamp = now_iso()

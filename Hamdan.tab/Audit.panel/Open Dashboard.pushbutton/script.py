@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Open the newest local Revit Scanner HTML dashboard."""
+"""Open the newest local Hamdan HTML dashboard."""
 import os
 from pyrevit import forms
 from System.Diagnostics import Process
