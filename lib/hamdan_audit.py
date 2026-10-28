@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Portable audit identity, geometry candidate and scoring helpers."""
+"""Portable audit identity and scoring helpers."""
 from __future__ import unicode_literals
 import hashlib
-import itertools
 import json
-import math
 
 
 def stable_key(value):
@@ -16,39 +14,6 @@ def identity_key(identity):
     if not identity.get('path'):
         values.append(identity.get('session'))
     return stable_key(values)
-
-
-def point_distance(a, b):
-    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
-
-
-def duplicate_pairs(records, tolerance, tick=lambda: None):
-    """Neighbour cells plus full orientation/context checks; never compare midpoint alone."""
-    buckets, result = {}, []
-    tolerance = max(float(tolerance), 1e-9)
-    for record in records:
-        tick()
-        points = record['points']
-        center = [sum(p[i] for p in points) / len(points) for i in range(3)]
-        cell = tuple(int(math.floor(v / tolerance)) for v in center)
-        context = tuple(record.get(k) for k in ('category', 'type_id', 'phase', 'option', 'host', 'kind'))
-        for offset in itertools.product((-1, 0, 1), repeat=3):
-            neighbours = buckets.get((context, tuple(cell[i] + offset[i] for i in range(3))), [])
-            for other in neighbours:
-                op = other['points']
-                if len(points) != len(op):
-                    continue
-                forward = all(point_distance(a, b) <= tolerance for a, b in zip(points, op))
-                reverse = all(point_distance(a, b) <= tolerance for a, b in zip(points, reversed(op)))
-                if not (forward or reverse):
-                    continue
-                if record.get('orientation') != other.get('orientation'):
-                    continue
-                if record.get('mirrored') != other.get('mirrored'):
-                    continue
-                result.append((other, record))
-        buckets.setdefault((context, cell), []).append(record)
-    return result
 
 
 def warning_occurrence_key(failure_id, description, failing, additional=()):
@@ -68,7 +33,7 @@ def penalty_rows(clashes, standards, config):
     active = [c for c in clashes if c.get('status') not in ('Approved', 'Resolved')]
     add('hard_clash', len([c for c in active if c.get('kind') == 'Hard' and c.get('evidence') == 'Solid intersection']),
         8, 'Resolve confirmed hard clashes', 'Review solid intersections and coordinate the affected geometry.')
-    # AABB clearance and duplicate candidates remain reviewable, without speculative score deductions.
+    # AABB clearance candidates do not receive speculative score deductions.
     for severity in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW'):
         count = sum(w.get('count', 1) for w in standards.get('revit_warnings', []) if w.get('severity') == severity)
         add(severity.lower() + '_revit_warning', count, {'CRITICAL': 5, 'HIGH': 3, 'MEDIUM': 1, 'LOW': 0}[severity],
@@ -82,6 +47,8 @@ def penalty_rows(clashes, standards, config):
     add('performance_flag', len([i for i in standards.get('performance_flags', []) if i.get('type') == 'performance']),
         1, 'Review performance flags', 'Check the listed views or content before changing settings.')
     for issue in standards.get('model_health', {}).get('issues', []):
+        if issue.get('type') == 'duplicate_marks':
+            continue  # Legacy payloads must not restore the removed custom check.
         add('health_' + issue.get('type', ''), issue.get('count', 1),
             3 if issue.get('severity') == 'HIGH' else (2 if issue.get('severity') == 'MEDIUM' else 1),
             issue.get('message', 'Review model health'), 'Review the affected-item inventory in this report.')

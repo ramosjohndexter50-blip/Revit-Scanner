@@ -49,7 +49,7 @@ from System.Diagnostics import Process
 from System import Int64
 from hamdan_issues import attach_references, build_issues, model_identity, identity_matches
 from hamdan_elements import describe_element, text_type, collect_rooms
-from hamdan_audit import duplicate_pairs, warning_occurrence_key, stable_key, identity_key, penalty_rows, clash_history
+from hamdan_audit import warning_occurrence_key, stable_key, identity_key, penalty_rows, clash_history
 from hamdan_exports import write_bcf21, write_clash_csv
 from hamdan_clashes import ClashEngine
 from hamdan_profiles import effective_config
@@ -465,41 +465,6 @@ def link_coordination_checks():
     return issues
 
 
-def duplicate_detection(elements, config):
-    records = []
-    for element in elements:
-        scan_tick()
-        try:
-            location = element.Location
-            point = getattr(location, 'Point', None)
-            if point is not None:
-                points, kind = [[point.X, point.Y, point.Z]], 'point'
-            else:
-                curve = getattr(location, 'Curve', None)
-                if curve is None:
-                    continue
-                points = [[p.X, p.Y, p.Z] for p in (curve.Evaluate(0, True), curve.Evaluate(.25, True),
-                          curve.Evaluate(.5, True), curve.Evaluate(.75, True), curve.Evaluate(1, True))]
-                kind = curve.GetType().FullName
-            orientation = None
-            mirrored = False
-            if isinstance(element, FamilyInstance):
-                transform = element.GetTransform()
-                orientation = tuple(round(getattr(v, axis), 8) for v in (transform.BasisX, transform.BasisY, transform.BasisZ)
-                                    for axis in ('X', 'Y', 'Z'))
-                mirrored = element.Mirrored
-            records.append({'id': element_id_value(element.Id), 'category': category_bic_name(element),
-                'type_id': element_id_value(element.GetTypeId()), 'phase': element_id_value(element.CreatedPhaseId),
-                'option': element_id_value(element.DesignOption.Id) if element.DesignOption is not None else -1,
-                'host': element_id_value(element.Host.Id) if isinstance(element, FamilyInstance) and element.Host is not None else -1,
-                'points': points, 'kind': kind, 'orientation': orientation, 'mirrored': mirrored})
-        except Exception as error:
-            if len(SCAN_DIAGNOSTICS) < 500:
-                SCAN_DIAGNOSTICS.append({'type': 'duplicate_skip', 'element_id': element_id_value(element.Id), 'message': str(error)})
-    return [{'type': 'duplicate', 'element_a': a['id'], 'element_b': b['id'], 'category': a['category'],
-             'message': 'Duplicate candidate: same type identity, context, orientation and sampled location; verify full geometry.'}
-            for a, b in duplicate_pairs(records, mm_to_internal(config.get('duplicate_location_tolerance_mm', 10)), scan_tick)]
-
 def unused_and_performance_checks(config):
     issues = []
     for view in FilteredElementCollector(doc).OfClass(View3D):
@@ -560,7 +525,7 @@ def document_warnings():
 
 def model_health_inventory(elements):
     """Collect practical project-health metrics without editing the model."""
-    result = {"issues": [], "check_errors": [], "links": [], "duplicate_marks": [], "unplaced_rooms": [], "unenclosed_rooms": [], "unplaced_views": [],
+    result = {"issues": [], "check_errors": [], "links": [], "unplaced_rooms": [], "unenclosed_rooms": [], "unplaced_views": [],
               "imported_cad_elements": []}
     path = getattr(doc, "PathName", "") or ""
     result["model_path"] = path
@@ -595,26 +560,6 @@ def model_health_inventory(elements):
         result['detail_group_count'] = FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_IOSDetailGroups).WhereElementIsNotElementType().GetElementCount()
     except Exception as error:
         result['check_errors'].append({'type': 'inventory_error', 'message': 'Model metadata: {}'.format(error)})
-
-    mark_map = {}
-    for element in elements:
-        scan_tick()
-        if not isinstance(element, FamilyInstance):
-            continue
-        try:
-            mark = get_param(element, "Mark")
-            value = mark.AsString() if mark else None
-            if value and value.strip():
-                key = (category_bic_name(element), value.strip())
-                mark_map.setdefault(key, []).append(element_id_value(element.Id))
-        except Exception as error:
-            result['check_errors'].append({'type': 'inventory_error', 'message': str(error)})
-    for key, ids in mark_map.items():
-        if len(ids) > 1:
-            result["duplicate_marks"].append({"category": key[0], "mark": key[1], "element_ids": ids})
-    if result["duplicate_marks"]:
-        result["issues"].append({"type": "duplicate_marks", "severity": "HIGH", "count": len(result["duplicate_marks"]),
-                                 "message": "{} duplicate Mark value group(s) need review.".format(len(result["duplicate_marks"]))})
 
     try:
         rooms = collect_rooms(DB, doc)
@@ -683,7 +628,6 @@ def collect_standards(elements, config):
         ('required_parameters', 'Required parameters', lambda: required_parameter_check(elements, config)),
         ('workset_issues', 'Worksets', workset_health),
         ('link_and_view_issues', 'Links and views', link_coordination_checks),
-        ('duplicates', 'Duplicate candidates', lambda: duplicate_detection(elements, config)),
         ('performance_flags', 'Performance checks', lambda: unused_and_performance_checks(config))]
     for index, (key, label, check) in enumerate(checks):
         scan_tick(label, index, len(checks))
@@ -721,7 +665,7 @@ def flatten_warnings(clashes, standards):
             warnings.append({"key": "param:{}:{}:{}".format(missing["category"], missing["element_id"], missing["parameter"]),
                              "kind": "warning", "severity": "Low", "status": "Active",
                              "message": "Missing {} on element {}".format(missing["parameter"], missing["element_id"])})
-    for group in ("workset_issues", "link_and_view_issues", "duplicates", "performance_flags"):
+    for group in ("workset_issues", "link_and_view_issues", "performance_flags"):
         for issue in standards.get(group, []):
             if issue.get("type", "").endswith("_info"):
                 continue
@@ -729,6 +673,8 @@ def flatten_warnings(clashes, standards):
                              "kind": "warning", "severity": "Medium", "status": "Active",
                              "message": issue.get("message", str(issue))})
     for issue in standards.get("model_health", {}).get("issues", []):
+        if issue.get("type") == "duplicate_marks":
+            continue
         warnings.append({"key": "health:{}".format(issue.get("type")), "kind": "model_health",
                          "severity": issue.get("severity", "MEDIUM"), "status": "Active",
                          "message": issue.get("message", str(issue))})
@@ -879,7 +825,6 @@ def export_html_dashboard(data, path):
         ("Revit links loaded", "{} / {}".format(loaded_links, len(health.get("links", [])))),
         ("Rooms / unplaced", "{} / {}".format(health.get("room_count", 0), len(health.get("unplaced_rooms", [])))),
         ("Unplaced printable views", health.get("unplaced_views", []) and len(health.get("unplaced_views", [])) or 0),
-        ("Duplicate Mark groups", len(health.get("duplicate_marks", []))),
         ("Imported CAD / linked CAD", "{} / {}".format(health.get("imported_cad_count", 0), health.get("linked_cad_count", 0)))
     ]
     scope = data.get('scan_scope', {})
@@ -927,7 +872,7 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
 <section style="margin-top:18px;overflow:auto"><h2>Clash Register</h2>{clash_table}</section>
 <section style="margin-top:18px"><h2>Required Parameter Completeness</h2>{parameter_table}</section>
 <section id="issues" style="margin-top:18px;overflow:auto"><h2>Review Issues</h2><input id="issue-search" aria-label="Search findings" placeholder="Search severity, element name, level or ID" style="padding:10px;width:90%;margin-bottom:12px"/><p class="note">In Revit, use Hamdan &gt; Audit &gt; Review Issues to select and zoom to an affected element. Search by severity, level, description or Element ID.</p>{issues_table}</section>
-<section style="margin-top:18px"><h2>Scan Notes</h2>{checks_table}{coverage_table}{diagnostics_table}<p class="note">Hard clashes require positive solid intersection. Clearance and duplicate candidates require visual review and do not reduce the score. Unloaded links, unsupported geometry and failed checks are listed below. Closed worksets and unloaded links cannot be certified as clash-free.</p></section>
+<section style="margin-top:18px"><h2>Scan Notes</h2>{checks_table}{coverage_table}{diagnostics_table}<p class="note">Hard clashes require positive solid intersection. Clearance candidates require visual review and do not reduce the score. Custom duplicate-element and repeated-Mark checks are excluded from this scan. Unloaded links, unsupported geometry and failed checks are listed below. Closed worksets and unloaded links cannot be certified as clash-free.</p></section>
 <div class="footer">Generated locally by Hamdan. No cloud service or AI API was used.</div></main><script>
 document.getElementById('issue-search').oninput=function(){{var q=this.value.toLowerCase();document.querySelectorAll('#issues tbody tr').forEach(function(r){{r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';}});}};
 document.querySelectorAll('th').forEach(function(h){{h.style.cursor='pointer';h.onclick=function(){{

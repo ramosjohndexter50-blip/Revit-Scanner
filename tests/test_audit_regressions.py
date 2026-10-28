@@ -11,31 +11,51 @@ from types import SimpleNamespace as NS
 import xml.etree.ElementTree as ET
 
 from test_issue_review import AUDIT, ROOT, extract_functions
-from hamdan_audit import duplicate_pairs, warning_occurrence_key, penalty_rows, clash_history, identity_key
+from hamdan_audit import warning_occurrence_key, penalty_rows, clash_history, identity_key
 from hamdan_clashes import ClashEngine, transformed_box
 from hamdan_exports import write_bcf21, write_clash_csv
 from hamdan_elements import ElementListState
+from hamdan_issues import build_issues
+from hamdan_profiles import validate_rules
 from hamdan_sheets import plan_sheets, create_batch
 
 
 class AuditRegressionTests(unittest.TestCase):
-    def record(self, number, points, **changes):
-        row = dict(id=number, category='Walls', type_id=10, phase=1, option=-1, host=-1,
-                   kind='line', orientation=None, mirrored=False, points=points)
-        row.update(changes)
-        return row
+    def test_inventory_does_not_scan_repeated_geometry_or_marks(self):
+        class ModelElements:
+            def __iter__(self):
+                raise AssertionError('Inventory must not enumerate elements for duplicate checks.')
+        def unavailable(*args):
+            raise RuntimeError('Metadata unavailable in this fixture')
+        ns = {'doc': NS(PathName='', IsWorkshared=False), 'os': os,
+              'FilteredElementCollector': unavailable, 'collect_rooms': lambda *args: [],
+              'DB': NS(), 'scan_tick': lambda: None}
+        extract_functions(AUDIT, ('model_health_inventory',), ns)
+        result = ns['model_health_inventory'](ModelElements())
+        self.assertNotIn('duplicate_marks', result)
+        self.assertEqual(0, result['room_count'])
+        self.assertFalse(any(row.get('type') == 'duplicate_marks' for row in result['issues']))
 
-    def test_crossing_walls_are_not_duplicates(self):
-        a = self.record(1, [[-5, 0, 0], [0, 0, 0], [5, 0, 0]])
-        b = self.record(2, [[0, -5, 0], [0, 0, 0], [0, 5, 0]])
-        self.assertEqual([], duplicate_pairs([a, b], .01))
-
-    def test_duplicate_neighbour_cells_reversed_and_context(self):
-        a = self.record(1, [[.99, 0, 0], [2.99, 0, 0]])
-        b = self.record(2, [[3.01, 0, 0], [1.01, 0, 0]])
-        self.assertEqual(1, len(duplicate_pairs([a, b], 1)))
-        for field, value in [('type_id', 11), ('phase', 2), ('option', 3), ('host', 4)]:
-            self.assertEqual([], duplicate_pairs([a, dict(b, **{field: value})], 1))
+    def test_duplicate_payloads_excluded_but_native_warnings_preserved(self):
+        native = {'failure_id': 'native-duplicate', 'description': 'Duplicate instances',
+                  'severity': 'CRITICAL', 'count': 1, 'element_ids': [1, 2],
+                  'occurrences': [{'key': 'native-key', 'element_ids': [1, 2]}]}
+        standards = {'duplicates': [{'element_a': 1, 'element_b': 2}],
+                     'model_health': {'duplicate_marks': [{'mark': 'M1', 'element_ids': [1, 2]}],
+                                      'issues': [{'type': 'duplicate_marks', 'severity': 'HIGH', 'count': 99}]}}
+        self.assertEqual([], build_issues({'standards': standards}))
+        legacy = validate_rules({'duplicate_location_tolerance_mm': 10,
+                                 'health_weights': {'duplicate': 999, 'health_duplicate_marks': 999}})
+        self.assertEqual([], penalty_rows([], standards, legacy))
+        ns = {}
+        extract_functions(AUDIT, ('flatten_warnings',), ns)
+        self.assertEqual([], ns['flatten_warnings']([], standards))
+        standards['revit_warnings'] = [native]
+        rows = build_issues({'standards': standards})
+        self.assertEqual(['Revit warning'], [row['kind'] for row in rows])
+        self.assertEqual([1, 2], rows[0]['element_ids'])
+        self.assertEqual(['native-key'], [row['key'] for row in ns['flatten_warnings']([], standards)])
+        self.assertEqual(5, sum(row['impact'] for row in penalty_rows([], standards, legacy)))
 
     def test_warning_trend_tracks_changed_affected_elements(self):
         first = warning_occurrence_key('same failure', 'overlap', [1, 2])
@@ -123,17 +143,20 @@ class AuditRegressionTests(unittest.TestCase):
     def test_one_failed_health_check_does_not_stop_other_checks(self):
         calls = []
         def failed(): raise RuntimeError('Warning API failed')
+        def forbidden_duplicates(*args): raise AssertionError('Duplicate detection must not run')
         ns = {'CHECK_RESULTS': {}, 'SCAN_DIAGNOSTICS': [], 'scan_tick': lambda *args: None,
               'document_warnings': failed, 'model_health_inventory': lambda e: calls.append('health') or {},
               'validate_naming': lambda c: [], 'required_parameter_check': lambda e, c: [],
               'workset_health': lambda: [], 'link_coordination_checks': lambda: [],
-              'duplicate_detection': lambda e, c: [], 'unused_and_performance_checks': lambda c: []}
+              'duplicate_detection': forbidden_duplicates, 'unused_and_performance_checks': lambda c: []}
         extract_functions(AUDIT, ('collect_standards',), ns)
         result = ns['collect_standards']([], {})
         self.assertEqual('FAILED', ns['CHECK_RESULTS']['revit_warnings']['status'])
         self.assertEqual('PASS', ns['CHECK_RESULTS']['model_health']['status'])
         self.assertEqual(['health'], calls)
-        self.assertEqual(8, len(result))
+        self.assertEqual(7, len(result))
+        self.assertNotIn('duplicates', result)
+        self.assertNotIn('duplicates', ns['CHECK_RESULTS'])
 
     def test_list_can_contain_all_elements_beyond_old_2000_limit(self):
         state = ElementListState()

@@ -103,6 +103,8 @@ class FreshScanTests(unittest.TestCase):
             self.assertIn('Current scan', html)
             self.assertNotIn('Warning Trends', html)
             self.assertNotIn('Delta:', html)
+            self.assertNotIn('Duplicate Mark groups', html)
+            self.assertIn('Custom duplicate-element and repeated-Mark checks are excluded', html)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,14 @@
 # Verification boundary
 
+## Custom duplicate checks removed, 2026-10-28
+
+92 portable regressions pass. The scan no longer runs geometry/location duplicate
+comparisons or repeated-Mark inventory checks. Tests exercise the scan pipeline,
+legacy config acceptance, absent duplicate findings/penalties, and the generated HTML.
+Native Revit duplicate warnings remain visible and retain their configured severity.
+All 33 runtime Python files compile in the installed IronPython 2.7 engine.
+This change has no new live Revit model scan or performance benchmark.
+
 ## Fresh scan sessions, 2026-10-28 (3.3)
 
 92 portable regressions pass; 33 runtime Python files compile in the installed IronPython

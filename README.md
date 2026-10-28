@@ -10,7 +10,7 @@ A pyRevit extension for model-health auditing, clash review, and sheet/room numb
 - A self-contained HTML dashboard that opens after each scan, plus JSON results for the current scan
 - Clash states: New, Active, Resolved, and Approved
 - CSV and BCF 2.1 clash exports
-- Naming rules, required-parameter completeness, workset health, link-coordination review, possible duplicates, and performance flags
+- Naming rules, required-parameter completeness, workset health, link-coordination review and performance flags
 - Top ten fixes ranked by estimated Health Score impact
 - Per-level and per-discipline breakdowns
 - Review Issues: searchable findings with severity, Element IDs, level, and suggested fixes; select and zoom to an issue directly in Revit
@@ -33,7 +33,7 @@ The audit is read-only: it creates reports but never adds, edits, or deletes Rev
 
 **Run Audit** first offers three scan modes:
 
-- **Quick Scan**: warnings, naming/parameter completeness, model health, and duplicate checks; skips clashes and their CSV/BCF exports.
+- **Quick Scan**: warnings, naming/parameter completeness, model health; skips clashes and their CSV/BCF exports.
 - **Clash Scan**: choose configured pairs or a discipline preset, then choose all levels or a single level band. Presets also ask for a clearance tolerance in millimetres. Elements crossing a selected level band are included.
 - **Full Audit**: health checks plus the category-pair clash rules from your configuration, across all levels.
 
@@ -44,6 +44,10 @@ to nearby candidates in the selected categories, including transformed link inst
 Hard clashes require positive solid-intersection volume. Clearance findings use bounding-box
 distance as a conservative candidate check; they do not certify actual surface clearance.
 The HTML marks checks excluded from the chosen mode as **Not scanned**.
+Custom duplicate-element and repeated-Mark checks are excluded from all scan modes,
+findings, recommendations and scores. Repeated content may be intentional. Native
+Revit warnings are still reported as returned by Revit, including duplicate-related warnings.
+Existing duplicate tolerance/weight keys are accepted for configuration compatibility and have no effect.
 Every scan starts fresh. No previous report, score comparison, approval or assignment is
 loaded. Starting an audit or a document check clears the prior current result for that
 open document; cancellation/failure leaves no old result to fall back to. Open Dashboard
@@ -56,7 +60,7 @@ BEP profiles and audit rules remain saved; this reset applies to scan results an
 The dashboard lists check status, time per check, geometry coverage and up to 500 detailed
 diagnostics with total clash-coverage counters. Failed checks, closed worksets, missing
 geometry or unloaded clash sources produce **Incomplete**, rather than a numeric passing
-score. Clearance and duplicate candidates and informational workset/link
+score. Clearance candidates and informational workset/link
 messages do not reduce the score. The same penalty rows drive both the score and Fix First.
 Edit `score_thresholds` and `health_weights` for the agreed project rules. Naming rules are
 project-configurable checks, not an ISO 19650 certification.
@@ -157,8 +161,8 @@ The batch limit is 500 sheets; it does not place views automatically.
   ValueOverride, orphaned IndependentTags and missing local independent tags for the
   configured categories. Default required-tag categories: Doors and Windows. Missing
   tags are BEP review candidates; the view collector is not proof that a tag is required.
-  Linked tags and room/space tags are outside this check. Duplicate Marks remain in
-  Run Audit. This tool does not infer which geometry needs dimensions.
+  Linked tags and room/space tags are outside this check. This tool does not infer
+  which geometry needs dimensions.
 - **Sheets > Sheet Layout:** choose sheets. Tests viewport/schedule rectangles against
   a unique title-block bounding rectangle, pairwise layout overlap candidates and
   required title-block information. Includes schedules, excludes revision schedules and

@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
     "ignore_nested_or_shared_family_components": True,
     "ignore_same_group": True,
     "ignore_same_assembly": True,
+    # Retained for existing audit_config.json/BEP profiles; duplicate checks no longer run.
     "duplicate_location_tolerance_mm": 10,
     "family_size_threshold_mb": 20,
     "required_parameters": {
@@ -54,7 +55,7 @@ DEFAULT_CONFIG = {
         "missing_parameter": 1,
         "naming_issue": 1,
         "workset_issue": 2,
-        "duplicate": 3,
+        "duplicate": 0,  # Legacy key; custom duplicates are excluded from scoring.
         "link_coordination": 4,
         "performance_flag": 1
     }

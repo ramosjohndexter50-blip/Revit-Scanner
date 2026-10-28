@@ -77,10 +77,6 @@ def build_issues(data):
                 [finding.get('element_id')],
                 'Check instance and type properties for {}. Fill the required value or correct the configured rule.'.format(
                     finding.get('parameter', 'this parameter')))
-    for finding in standards.get('duplicates', []):
-        add('Duplicate candidate', 'HIGH', finding.get('message', 'Possible duplicate'),
-            [finding.get('element_a'), finding.get('element_b')],
-            'Compare geometry, phase, design option, host and type before removing any duplicate.')
     fixes = {
         'workset_issues': 'Review the workset settings and ownership with the model coordinator.',
         'link_and_view_issues': 'Review the linked model transform or view settings against the coordination requirements.',
@@ -94,10 +90,6 @@ def build_issues(data):
                 [finding.get('element_id')] + finding.get('element_ids', []), fixes[group])
 
     health = standards.get('model_health', {})
-    for finding in health.get('duplicate_marks', []):
-        add('Duplicate Mark', 'HIGH', '{}: Mark {}'.format(finding.get('category', ''), finding.get('mark', '')),
-            finding.get('element_ids', []),
-            'Confirm whether this category requires unique instance Marks, then correct duplicate values.')
     for room_id in health.get('unplaced_rooms', []):
         add('Unplaced room', 'MEDIUM', 'Room is not placed', [room_id],
             'Locate the room in a room schedule and place it on the intended level, or remove it after review.')
@@ -111,8 +103,10 @@ def build_issues(data):
         add('Imported CAD', 'MEDIUM', finding.get('name', 'Imported CAD instance'), [finding.get('id')],
             'Review the CAD import, its layer visibility, and whether a linked CAD workflow is appropriate.')
     for finding in health.get('issues', []):
+        if finding.get('type') == 'duplicate_marks':
+            continue
         represented = {
-            'duplicate_marks': health.get('duplicate_marks'), 'unplaced_rooms': health.get('unplaced_rooms'),
+            'unplaced_rooms': health.get('unplaced_rooms'),
             'unplaced_views': health.get('unplaced_views'), 'imported_cad': health.get('imported_cad_elements')
         }
         if represented.get(finding.get('type')):

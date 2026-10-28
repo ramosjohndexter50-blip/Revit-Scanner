@@ -35,7 +35,7 @@ class IssueReviewTests(unittest.TestCase):
                           'model_health': {'duplicate_marks': [{'mark': 'D1', 'element_ids': [5, 6]}],
                                            'issues': [{'type': 'duplicate_marks', 'message': '2 marks'}]}}}
         rows = build_issues(data)
-        self.assertEqual(4, len(rows))
+        self.assertEqual(3, len(rows))
         self.assertEqual('CRITICAL', rows[0]['severity'])
         self.assertEqual([4], rows[0]['element_ids'])
         self.assertTrue(all(row['suggested_fix'] for row in rows))

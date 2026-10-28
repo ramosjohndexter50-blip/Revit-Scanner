@@ -67,7 +67,7 @@ def annotation_checks(DB, document, views, config, tick=lambda: None):
             notes.append({'type': 'annotation_error', 'element_id': id_value(view.Id), 'message': text_type(error)})
     coverage['complete'] = coverage['errors'] == 0 and coverage['views_scanned'] == coverage['views_requested']
     return {'findings': findings, 'notes': notes, 'coverage': coverage,
-            'scope_note': 'Selected host views only. Missing tags are BEP candidates from view collectors, not a judgement that every visible element needs a tag. Linked elements, room/space tags and dimensions required by design intent are outside this check. Duplicate Marks are covered by Run Audit.'}
+            'scope_note': 'Selected host views only. Missing tags are BEP candidates from view collectors, not a judgement that every visible element needs a tag. Linked elements, room/space tags and dimensions required by design intent are outside this check.'}
 
 
 def sheet_layout_checks(DB, document, sheets, config, tick=lambda: None):
