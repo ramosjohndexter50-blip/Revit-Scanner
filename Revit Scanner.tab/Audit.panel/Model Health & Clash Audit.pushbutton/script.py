@@ -1669,7 +1669,7 @@ def main():
         export_html_dashboard(data, html_path)
         print_report(data)
         try:
-            Process.Start(html_path)
+            Process.Start('explorer.exe', html_path)
         except Exception:
             pass
         forms.alert(

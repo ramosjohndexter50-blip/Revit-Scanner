@@ -12,4 +12,6 @@ if os.path.isdir(report_dir):
 if not dashboards:
     forms.alert('No HTML dashboard exists yet. Run Audit first.', title='Open Dashboard')
 else:
-    Process.Start(max(dashboards, key=os.path.getmtime))
+    # Revit's .NET host treats a direct HTML path as an executable. Explorer
+    # uses the registered default browser association instead.
+    Process.Start('explorer.exe', max(dashboards, key=os.path.getmtime))
