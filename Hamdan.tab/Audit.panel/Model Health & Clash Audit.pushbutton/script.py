@@ -43,15 +43,23 @@ from Autodesk.Revit.DB import (
     BuiltInCategory, BuiltInParameter, ElementId, FilteredElementCollector,
     FamilyInstance, IndependentTag, Level, RevitLinkInstance, View3D,
     ViewType, XYZ, BoundingBoxXYZ, WorksetKind, WorksetId,
-    WorksetTable, WorksetVisibility, UnitUtils
+    WorksetTable, WorksetVisibility, UnitUtils, BoundingBoxIntersectsFilter, Outline
 )
 from System.Diagnostics import Process
 from System import Int64
 from hamdan_issues import attach_references, build_issues, model_identity
+from hamdan_scan import (PRESETS, ScanCancelled, ScanProgress, pair_rules, preset_config,
+                         scope_record, in_level_band, classify_pair)
 
 doc = revit.doc
 uidoc = revit.uidoc
 output = script.get_output()
+SCAN_PROGRESS = None
+
+
+def scan_tick(label=None, current=None, total=None):
+    if SCAN_PROGRESS is not None:
+        SCAN_PROGRESS.pulse(label, current, total)
 
 SCRIPT_DIR = os.path.dirname(__file__)
 REPORT_DIR = os.path.join(os.path.expanduser("~"), "Documents", "RevitScanner", "reports")
@@ -252,6 +260,7 @@ def get_element_record(element):
 
 
 def describe_review_element(value):
+    scan_tick()
     element = doc.GetElement(ElementId(Int64(value)))
     return get_element_record(element) if element is not None else None
 
@@ -325,9 +334,12 @@ CONFIG = load_config()
 def all_model_elements():
     elements = []
     collector = FilteredElementCollector(doc).WhereElementIsNotElementType()
-    for element in collector:
+    total = collector.GetElementCount()
+    for index, element in enumerate(collector):
+        if index % 100 == 0:
+            scan_tick(current=index, total=total)
         try:
-            if element.Category and element.get_BoundingBox(None) is not None:
+            if element.Category and not element.ViewSpecific:
                 elements.append(element)
         except Exception:
             continue
@@ -363,75 +375,64 @@ def clash_pair_key(cat_a, cat_b):
     return "|".join(sorted([cat_a, cat_b]))
 
 
-def detect_clashes(elements, config):
-    """Fast AABB candidate detection. This is not a replacement for solid/geometry clash tests."""
-    category_map = {}
-    for el in elements:
-        cat = category_bic_name(el)
-        box = get_bbox(el)
-        if cat and box:
-            category_map.setdefault(cat, []).append((el, box))
-
-    hard_pairs = set()
-    for pair in config.get("hard_clash_categories", []):
-        if len(pair) == 2:
-            hard_pairs.add(clash_pair_key(pair[0], pair[1]))
-
-    tolerance_map = {}
-    for key, value in config.get("clearance_tolerances_mm", {}).items():
-        bits = key.split("|")
-        if len(bits) == 2:
-            tolerance_map[clash_pair_key(bits[0], bits[1])] = mm_to_internal(value)
-
-    clashes = []
-    seen = set()
-    cats = list(category_map.keys())
-    for i, cat_a in enumerate(cats):
-        for cat_b in cats[i:]:
-            pair_key = clash_pair_key(cat_a, cat_b)
-            is_hard_pair = pair_key in hard_pairs
-            clearance = tolerance_map.get(pair_key)
-            if not is_hard_pair and clearance is None:
-                continue
-            list_a = category_map[cat_a]
-            list_b = category_map[cat_b]
-            for idx_a, (a, box_a) in enumerate(list_a):
-                start = idx_a + 1 if cat_a == cat_b else 0
-                for b, box_b in list_b[start:]:
+def detect_clashes(config, band=None):
+    """Native bounding-box prefilter: expand only nearby target elements."""
+    clashes, seen, sources, boxes = [], set(), {}, {}
+    for rule in pair_rules(config):
+        cat_a, cat_b = rule['categories']
+        first_cat = getattr(BuiltInCategory, cat_a)
+        second_cat = getattr(BuiltInCategory, cat_b)
+        scan_tick('Clash scan: {} / {}'.format(cat_a.replace('OST_', ''), cat_b.replace('OST_', '')), 0, 1)
+        if cat_a not in sources:
+            rows = []
+            for index, element in enumerate(FilteredElementCollector(doc).OfCategory(first_cat).WhereElementIsNotElementType()):
+                if index % 100 == 0:
+                    scan_tick()
+                box = get_bbox(element)
+                if box and in_level_band(box, band):
+                    rows.append((element, box))
+            sources[cat_a] = rows
+        rows = sources[cat_a]
+        for index, (a, box_a) in enumerate(rows):
+            scan_tick(current=index, total=len(rows))
+            tolerance = mm_to_internal(rule.get('clearance_mm') or 0)
+            outline = Outline(XYZ(box_a[0] - tolerance, box_a[1] - tolerance, box_a[2] - tolerance),
+                              XYZ(box_a[3] + tolerance, box_a[4] + tolerance, box_a[5] + tolerance))
+            query_filter = BoundingBoxIntersectsFilter(outline)
+            collector = FilteredElementCollector(doc).OfCategory(second_cat).WhereElementIsNotElementType().WherePasses(query_filter)
+            try:
+                for candidate_index, b in enumerate(collector):
+                    if candidate_index % 50 == 0:
+                        scan_tick()
                     aid, bid = element_id_value(a.Id), element_id_value(b.Id)
-                    if aid == bid:
+                    if aid == bid or (cat_a == cat_b and aid >= bid):
                         continue
-                    pair_ids = tuple(sorted((aid, bid)))
-                    if pair_ids in seen:
+                    ids = tuple(sorted((aid, bid)))
+                    if ids in seen:
+                        continue
+                    if bid not in boxes:
+                        boxes[bid] = get_bbox(b)
+                    box_b = boxes[bid]
+                    if not box_b or not in_level_band(box_b, band):
                         continue
                     if element_is_ignored_pair(a, b, config):
                         continue
-                    if is_hard_pair:
-                        if bbox_overlap_volume(box_a, box_b) <= 1e-8:
-                            continue
-                        kind = "Hard"
-                        overlap = bbox_overlap_volume(box_a, box_b)
-                    else:
-                        if bbox_intersection(box_a, box_b, clearance):
-                            # Only classify as clearance when boxes do not already overlap.
-                            if bbox_overlap_volume(box_a, box_b) > 1e-8:
-                                continue
-                            kind = "Clearance"
-                            overlap = 0.0
-                        else:
-                            continue
-                    seen.add(pair_ids)
+                    kind, overlap = classify_pair(box_a, box_b, rule)
+                    if kind is None:
+                        continue
+                    seen.add(ids)
                     clashes.append({
-                        "clash_id": str(uuid.uuid5(uuid.NAMESPACE_URL, "{}:{}:{}".format(doc.Title, pair_ids[0], pair_ids[1]))),
-                        "kind": kind,
-                        "status": "Active",
-                        "element_a": get_element_record(a),
-                        "element_b": get_element_record(b),
-                        "overlap_volume_internal": overlap,
-                        "tolerance_mm": internal_to_mm(clearance) if clearance is not None and not is_hard_pair else 0,
-                        "message": "{} clash between {} ({}) and {} ({})".format(
-                            kind, category_key(a), aid, category_key(b), bid)
+                        'clash_id': str(uuid.uuid5(uuid.NAMESPACE_URL, '{}:{}:{}'.format(doc.Title, ids[0], ids[1]))),
+                        'kind': kind, 'status': 'Active', 'element_a': get_element_record(a),
+                        'element_b': get_element_record(b), 'overlap_volume_internal': overlap,
+                        'tolerance_mm': rule['clearance_mm'] if kind == 'Clearance' else 0,
+                        'message': '{} clash between {} ({}) and {} ({})'.format(kind, category_key(a), aid, category_key(b), bid)
                     })
+            finally:
+                collector.Dispose()
+                query_filter.Dispose()
+                outline.Dispose()
+        scan_tick(current=len(rows), total=len(rows))
     return clashes
 
 
@@ -454,6 +455,7 @@ def validate_naming(config):
             issues.append({"type": "config_error", "rule": key, "message": "Invalid regex: {}".format(pattern)})
             continue
         for item in items:
+            scan_tick()
             try:
                 if key == "views" and item.IsTemplate:
                     continue
@@ -486,6 +488,7 @@ def required_parameter_check(elements, config):
     rules = config.get("required_parameters", {})
     by_cat = {}
     for el in elements:
+        scan_tick()
         cat = category_bic_name(el)
         if cat in rules:
             by_cat.setdefault(cat, []).append(el)
@@ -499,6 +502,7 @@ def required_parameter_check(elements, config):
         total = len(items) * max(1, len(names))
         filled = 0
         for el in items:
+            scan_tick()
             for pname in names:
                 p = get_param(el, pname)
                 value = get_param_text(el, pname)
@@ -528,6 +532,7 @@ def workset_health():
             if ws.Name == "Workset1":
                 count = 0
                 for el in FilteredElementCollector(doc).WhereElementIsNotElementType():
+                    scan_tick()
                     try:
                         if element_id_value(el.WorksetId) == element_id_value(ws.Id):
                             count += 1
@@ -545,6 +550,7 @@ def workset_health():
         # Borrowed status is API/version/worksharing-state dependent.
         borrowed = 0
         for el in FilteredElementCollector(doc).WhereElementIsNotElementType():
+            scan_tick()
             try:
                 if el.IsBorrowed:
                     borrowed += 1
@@ -598,6 +604,7 @@ def duplicate_detection(elements, config):
     buckets = {}
     duplicates = []
     for el in elements:
+        scan_tick()
         try:
             loc = el.Location
             point = getattr(loc, "Point", None)
@@ -681,6 +688,7 @@ def document_warnings():
     except Exception:
         return []
     for warning in warnings:
+        scan_tick()
         try:
             description = warning.GetDescriptionText() or "Revit warning"
             try:
@@ -728,6 +736,7 @@ def model_health_inventory(elements):
 
     mark_map = {}
     for element in elements:
+        scan_tick()
         if not isinstance(element, FamilyInstance):
             continue
         try:
@@ -750,6 +759,7 @@ def model_health_inventory(elements):
         rooms = FilteredElementCollector(doc).OfClass(room_class).ToElements()
         result["room_count"] = len(rooms)
         for room in rooms:
+            scan_tick()
             if room.Location is None:
                 result["unplaced_rooms"].append(element_id_value(room.Id))
         if result["unplaced_rooms"]:
@@ -763,9 +773,11 @@ def model_health_inventory(elements):
         sheet_class = __import__("Autodesk.Revit.DB", fromlist=["ViewSheet"]).ViewSheet
         placed = set()
         for sheet in FilteredElementCollector(doc).OfClass(sheet_class).ToElements():
+            scan_tick()
             for view_id in sheet.GetAllPlacedViews():
                 placed.add(element_id_value(view_id))
         for view in FilteredElementCollector(doc).OfClass(view_class).ToElements():
+            scan_tick()
             try:
                 if not view.IsTemplate and view.CanBePrinted and element_id_value(view.Id) not in placed:
                     result["unplaced_views"].append({"id": element_id_value(view.Id), "name": view.Name})
@@ -794,16 +806,22 @@ def model_health_inventory(elements):
 
 
 def collect_standards(elements, config):
-    return {
-        "revit_warnings": document_warnings(),
-        "model_health": model_health_inventory(elements),
-        "naming_issues": validate_naming(config),
-        "required_parameters": required_parameter_check(elements, config),
-        "workset_issues": workset_health(),
-        "link_and_view_issues": link_coordination_checks(),
-        "duplicates": duplicate_detection(elements, config),
-        "performance_flags": unused_and_performance_checks(config)
-    }
+    result = {}
+    checks = [
+        ('revit_warnings', 'Revit warnings', document_warnings),
+        ('model_health', 'Model health', lambda: model_health_inventory(elements)),
+        ('naming_issues', 'Naming rules', lambda: validate_naming(config)),
+        ('required_parameters', 'Required parameters', lambda: required_parameter_check(elements, config)),
+        ('workset_issues', 'Worksets', workset_health),
+        ('link_and_view_issues', 'Links and views', link_coordination_checks),
+        ('duplicates', 'Duplicate candidates', lambda: duplicate_detection(elements, config)),
+        ('performance_flags', 'Performance checks', lambda: unused_and_performance_checks(config))
+    ]
+    for index, (key, label, check) in enumerate(checks):
+        scan_tick(label, index, len(checks))
+        result[key] = check()
+    scan_tick(current=len(checks), total=len(checks))
+    return result
 
 
 def flatten_warnings(clashes, standards):
@@ -848,12 +866,12 @@ def previous_audit_files():
     return sorted(files, key=lambda p: os.path.getmtime(p), reverse=True)
 
 
-def load_previous_audit(current_doc_key):
+def load_previous_audit(current_doc_key, scan_scope=None):
     for path in previous_audit_files():
         try:
             with open_text_compat(path, "r") as f:
                 data = json.load(f)
-            if data.get("document_key") == current_doc_key:
+            if data.get("document_key") == current_doc_key and data.get('scan_scope') == scan_scope:
                 return data
         except Exception:
             continue
@@ -953,6 +971,7 @@ def discipline_name(cat):
 def breakdown_tables(elements, clashes):
     per_level, per_discipline = {}, {}
     for el in elements:
+        scan_tick()
         level = get_level_name(el)
         cat = category_bic_name(el)
         per_level.setdefault(level, {"elements": 0, "hard_clashes": 0, "clearance_clashes": 0})
@@ -978,6 +997,7 @@ def export_clashes_csv(clashes, path):
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for c in clashes:
+            scan_tick()
             a, b = c["element_a"], c["element_b"]
             writer.writerow({
                 "clash_id": c["clash_id"], "kind": c["kind"], "status": c.get("status", "Active"),
@@ -1005,6 +1025,7 @@ def export_bcf21(clashes, path, project_name):
     makedirs_compat(temp_dir)
     try:
         for c in clashes:
+            scan_tick()
             topic_guid = bcf_guid(c["clash_id"])
             topic_dir = os.path.join(temp_dir, topic_guid)
             makedirs_compat(topic_dir)
@@ -1111,12 +1132,22 @@ def export_html_dashboard(data, path):
         ("Duplicate Mark groups", len(health.get("duplicate_marks", []))),
         ("Imported CAD / linked CAD", "{} / {}".format(health.get("imported_cad_count", 0), health.get("linked_cad_count", 0)))
     ]
+    scope = data.get('scan_scope', {})
+    mode = scope.get('mode', 'Full Audit')
+    scope_label = '{} | {} | {}'.format(mode, scope.get('preset', 'Configured pairs'), scope.get('level_name', 'All levels'))
+    if mode == 'Quick Scan':
+        hard, clearance = 'Not scanned', 'Not scanned'
+    warning_count = 'Not scanned' if mode == 'Clash Scan' else len(data.get('standards', {}).get('revit_warnings', []))
+    elapsed = int(data.get('elapsed_seconds', 0))
+    delta_label = ('{:+}'.format(data.get('health_score_delta', 0))
+                   if data.get('previous_health_score') is not None else 'First scan for this scope')
     html = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Hamdan Audit</title><style>
 body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1d2939}}.top{{background:#111c2b;color:white;padding:28px 42px}}.top h1{{margin:0;font-size:28px}}.top p{{margin:7px 0 0;color:#b9c6d8}}.wrap{{max-width:1420px;margin:24px auto;padding:0 24px}}.grid{{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:16px}}.card,section{{background:white;border:1px solid #e4eaf2;border-radius:12px;padding:20px;box-shadow:0 3px 12px #172b4d0d}}.metric{{font-size:32px;font-weight:700;margin-top:9px}}.label{{color:#667085;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}}.good{{color:#039855}}.warn{{color:#dc6803}}.bad{{color:#d92d20}}.two{{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}}h2{{font-size:18px;margin:0 0 14px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th{{text-align:left;background:#f8fafc;color:#475467}}td,th{{padding:10px;border-bottom:1px solid #eaecf0;vertical-align:top}}.export{{display:inline-block;margin:4px 8px 4px 0;padding:9px 12px;border-radius:7px;background:#e8f1ff;color:#175cd3;text-decoration:none;font-weight:600}}.note{{font-size:12px;color:#667085;margin-top:14px}}.footer{{color:#667085;padding:25px 0;font-size:12px}}@media(max-width:850px){{.grid,.two{{grid-template-columns:1fr}}}}</style></head>
 <body><header class="top"><h1>Hamdan</h1><p>Model Health &amp; Clash Audit &middot; {model} &middot; {timestamp}</p></header><main class="wrap">
-<div class="grid"><div class="card"><div class="label">Health Score</div><div class="metric {score_class}">{score}/100</div><div class="note">Delta: {delta:+}</div></div><div class="card"><div class="label">Hard Clashes</div><div class="metric bad">{hard}</div></div><div class="card"><div class="label">Clearance Candidates</div><div class="metric warn">{clearance}</div></div><div class="card"><div class="label">Revit Warning Groups</div><div class="metric">{warnings}</div></div></div>
-<div class="two"><section><h2>Warning Trends</h2>{trend_table}</section><section><h2>Report Files</h2>{exports}<p class="note">JSON keeps local audit history. CSV and BCF are available for coordination workflows.</p></section></div>
+<section style="margin-bottom:18px"><h2>{scope_label}</h2><p class="note">Elapsed: {elapsed_label}. Score and trends apply to this scan scope only. Level scans include elements crossing the selected level band. Clash-only breakdowns cover the detected candidates.</p></section>
+<div class="grid"><div class="card"><div class="label">Scan Health Score</div><div class="metric {score_class}">{score}/100</div><div class="note">Delta: {delta_label}</div></div><div class="card"><div class="label">Hard Clashes</div><div class="metric bad">{hard}</div></div><div class="card"><div class="label">Clearance Candidates</div><div class="metric warn">{clearance}</div></div><div class="card"><div class="label">Revit Warning Groups</div><div class="metric">{warnings}</div></div></div>
+<div class="two"><section><h2>Warning Trends</h2>{trend_table}</section><section><h2>Report Files</h2>{exports}<p class="note">Files for this scan. JSON stores history for the selected scope; clash scans also export CSV and BCF.</p></section></div>
 <div class="two"><section><h2>Top 10 Fix First</h2>{fix_table}</section><section><h2>Clashes by Discipline</h2>{discipline_table}</section></div>
 <div class="two"><section><h2>Model Health Inventory</h2>{health_table}</section><section><h2>Clashes by Level</h2>{level_table}</section></div>
 <section style="margin-top:18px"><h2>Required Parameter Completeness</h2>{parameter_table}</section>
@@ -1124,20 +1155,21 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
 <section style="margin-top:18px"><h2>Scan Notes</h2><p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
 <div class="footer">Generated locally by Hamdan. No cloud service or AI API was used.</div></main></body></html>""".format(
         model=html_escape(str(data.get("model_name", "Untitled"))), timestamp=html_escape(str(data.get("timestamp", ""))),
-        score=score, score_class=score_class, delta=data.get("health_score_delta", 0), hard=hard,
-        clearance=clearance, warnings=len(data.get("standards", {}).get("revit_warnings", [])),
+        score=score, score_class=score_class, delta_label=html_escape(delta_label), hard=hard,
+        clearance=clearance, warnings=warning_count, scope_label=html_escape(scope_label),
+        elapsed_label='{}m {:02d}s'.format(elapsed // 60, elapsed % 60),
         trend_table=html_table(["New", "Resolved", "Unchanged"], [(trend_counts["NEW"], trend_counts["RESOLVED"], trend_counts["UNCHANGED"])]),
         exports="".join(export_links),
         fix_table=html_table(["#", "Recommendation", "Items", "Impact", "Details"], fix_rows),
         discipline_table=html_table(["Discipline", "Elements", "Hard", "Clearance"], discipline_rows),
         level_table=html_table(["Level", "Elements", "Hard", "Clearance"], level_rows),
-        health_table=html_table(["Metric", "Result"], health_rows),
+        health_table=html_table(["Metric", "Result"], health_rows) if mode != 'Clash Scan' else 'Not included in this scan.',
         parameter_table=html_table(["Category", "Elements", "Filled", "Missing Values"], [
             (item.get("category", ""), item.get("element_count", 0),
              "{}%".format(item.get("filled_percent", 0)) if item.get("element_count", 0) else "N/A - no elements",
              len(item.get("missing", [])))
             for item in data.get("standards", {}).get("required_parameters", [])
-        ]),
+        ]) if mode != 'Clash Scan' else 'Not included in this scan.',
         issues_table=html_table(["Issue ID", "Severity", "Type", "Status", "Level", "Element IDs", "Finding", "Suggested Fix"], [
             (item['issue_id'], item['severity'], item['kind'], item['status'], item['level'],
              ', '.join(str(value) for value in item['element_ids']), item['message'], item['suggested_fix'])
@@ -1723,98 +1755,142 @@ def print_required_mep_setup():
     print("- **Configuration:** `{}`".format(os.path.join(REPORT_DIR, "mep_config.json")))
 
 
-def main():
-    if doc is None:
-        forms.alert("Open a Revit project before running this script.", title="BIM Audit")
-        return
-    if not forms.alert(
-            "Start scanning the current model?",
-            title="Hamdan", yes=True, no=True, warn_icon=False):
-        return
+def choose_scan():
+    mode = forms.CommandSwitchWindow.show(
+        ['Quick Scan', 'Clash Scan', 'Full Audit'],
+        message='Hamdan - Choose what to scan')
+    if not mode:
+        return None
+    config = dict(CONFIG)
+    preset = 'Configured pairs'
+    if mode == 'Quick Scan':
+        preset = 'Health and warnings'
+    level_id, level_name, band = '', 'All levels', None
+    if mode == 'Clash Scan':
+        preset = forms.CommandSwitchWindow.show(
+            ['Configured pairs'] + sorted(PRESETS), message='Choose a discipline pair')
+        if not preset:
+            return None
+        if preset != 'Configured pairs':
+            tolerance_text = forms.ask_for_string(
+                default='25', prompt='Clearance tolerance in millimetres (0 or greater).',
+                title='Hamdan - Clash Scan')
+            if tolerance_text is None:
+                return None
+            try:
+                config = preset_config(CONFIG, preset, float(tolerance_text))
+            except (ValueError, TypeError) as error:
+                forms.alert(str(error), title='Hamdan', warn_icon=False)
+                return None
+        levels = sorted(list(FilteredElementCollector(doc).OfClass(Level).ToElements()),
+                        key=lambda level: level.Elevation)
+        choices = {'All levels': ('', 'All levels', None)}
+        labels = ['All levels']
+        for level in levels:
+            label = '{} | {:.2f} m | ID {}'.format(
+                level.Name, level.Elevation * 0.3048, element_id_value(level.Id))
+            higher = [item.Elevation for item in levels if item.Elevation > level.Elevation + 1e-6]
+            choices[label] = (level.UniqueId, level.Name,
+                              [level.Elevation, min(higher) if higher else None])
+            labels.append(label)
+        chosen = forms.SelectFromList.show(labels, title='Hamdan - Choose level',
+                                           multiselect=False, button_name='Start Scan')
+        if not chosen:
+            return None
+        level_id, level_name, band = choices[chosen]
+    scope = scope_record(mode, config, preset, level_id, level_name, band)
+    return config, scope
 
+
+def run_selected_scan(config, scope):
+    mode = scope['mode']
+    scan_tick('Reading model', 0, 1)
+    elements = all_model_elements() if mode != 'Clash Scan' else []
+    clashes = detect_clashes(config, scope['level_band_internal']) if mode != 'Quick Scan' else []
+    standards = collect_standards(elements, config) if mode != 'Clash Scan' else {}
+    if mode == 'Clash Scan':
+        # The breakdown covers detected candidates, not a whole-model inventory.
+        ids = set(record['id'] for clash in clashes for record in (clash['element_a'], clash['element_b']))
+        elements = [doc.GetElement(ElementId(Int64(value))) for value in ids]
+        elements = [element for element in elements if element is not None]
+    scan_tick('Preparing findings', 0, 1)
     timestamp = now_iso()
-    model_name = doc.Title or "Untitled"
-    doc_key = "{}|{}".format(model_name, getattr(doc, "PathName", "") or "unsaved")
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = "audit_{}_{}".format(safe_name(model_name), run_id)
-    json_path = os.path.join(REPORT_DIR, base + ".json")
-    csv_path = os.path.join(REPORT_DIR, base + "_clashes.csv")
-    bcf_path = os.path.join(REPORT_DIR, base + "_clashes.bcf")
-    html_path = os.path.join(REPORT_DIR, base + ".html")
-
-    try:
-        elements = all_model_elements()
-        clashes = detect_clashes(elements, CONFIG)
-        standards = collect_standards(elements, CONFIG)
-        warnings = flatten_warnings(clashes, standards)
-        previous = load_previous_audit(doc_key)
-        trends = compare_history(warnings, previous)
-        score = health_score(clashes, standards, CONFIG)
-        old_score = previous.get("health_score") if previous else None
-        delta = score - old_score if old_score is not None else 0
-        breakdowns = breakdown_tables(elements, clashes)
-        fixes = fix_first(clashes, standards, CONFIG)
-
-        # Persist Approved statuses from the previous run for matching clash IDs.
-        resolved_clashes = []
-        if previous:
-            previous_clashes = {c.get("clash_id"): c for c in previous.get("clashes", [])}
-            for clash in clashes:
-                old = previous_clashes.get(clash["clash_id"])
-                if old and old.get("status") == "Approved":
-                    clash["status"] = "Approved"
-                elif old:
-                    clash["status"] = "Active"
-                else:
-                    clash["status"] = "New"
-            current_ids = set(c.get("clash_id") for c in clashes)
-            for old in previous_clashes.values():
-                if old.get("clash_id") not in current_ids:
-                    resolved = dict(old)
-                    resolved["status"] = "Resolved"
-                    resolved_clashes.append(resolved)
-        else:
-            for clash in clashes:
-                clash["status"] = "New"
-
+    model_name = doc.Title or 'Untitled'
+    doc_key = '{}|{}'.format(model_name, getattr(doc, 'PathName', '') or 'unsaved')
+    run_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    base = 'audit_{}_{}'.format(safe_name(model_name), run_id)
+    json_path = os.path.join(REPORT_DIR, base + '.json')
+    csv_path = os.path.join(REPORT_DIR, base + '_clashes.csv')
+    bcf_path = os.path.join(REPORT_DIR, base + '_clashes.bcf')
+    html_path = os.path.join(REPORT_DIR, base + '.html')
+    previous = load_previous_audit(doc_key, scope)
+    previous_clashes = dict((c['clash_id'], c) for c in (previous or {}).get('clashes', []))
+    for clash in clashes:
+        old = previous_clashes.get(clash['clash_id'])
+        clash['status'] = 'Approved' if old and old.get('status') == 'Approved' else ('Active' if old else 'New')
+    current_ids = set(c['clash_id'] for c in clashes)
+    resolved = [dict(old, status='Resolved') for key, old in previous_clashes.items() if key not in current_ids]
+    warnings = flatten_warnings(clashes, standards)
+    score = health_score(clashes, standards, config)
+    old_score = previous.get('health_score') if previous else None
+    data = {
+        'schema_version': '2.1', 'timestamp': timestamp,
+        'user': os.environ.get('USERNAME') or 'unknown', 'model_name': model_name,
+        'document_key': doc_key, 'scan_scope': scope,
+        'health_score': score, 'previous_health_score': old_score,
+        'health_score_delta': score - old_score if old_score is not None else 0,
+        'clashes': clashes, 'resolved_clashes': resolved, 'standards': standards,
+        'warnings': warnings, 'warning_trends': compare_history(warnings, previous),
+        'fix_first': fix_first(clashes, standards, config),
+        'breakdowns': breakdown_tables(elements, clashes), 'config_path': CONFIG_PATH,
+        'exports': {'HTML dashboard': html_path, 'JSON history': json_path}
+    }
+    scan_tick('Preparing issue register', 0, 1)
+    data['review_model_identity'] = model_identity(doc, Process.GetCurrentProcess().Id)
+    data['review_issues'] = attach_references(build_issues(data), describe_review_element)
+    if mode != 'Quick Scan':
+        scan_tick('Exporting clash CSV', 0, 1)
         export_clashes_csv(clashes, csv_path)
+        scan_tick('Exporting BCF viewpoints', 0, 1)
         export_bcf21(clashes, bcf_path, model_name)
+        data['exports'].update({'CSV clashes': csv_path, 'BCF 2.1': bcf_path})
+    scan_tick('Saving dashboard', 0, 1)
+    data['elapsed_seconds'] = round(SCAN_PROGRESS.clock() - SCAN_PROGRESS.started, 2) if SCAN_PROGRESS else 0
+    export_html_dashboard(data, html_path)
+    # Save history last: a cancelled/failed run must never become a completed baseline.
+    with open_text_compat(json_path, 'w') as handle:
+        json.dump(data, handle, indent=2, ensure_ascii=True, default=str)
+    return html_path
 
-        data = {
-            "schema_version": "2.0",
-            "timestamp": timestamp,
-            "user": os.environ.get("USERNAME") or os.environ.get("USER") or "unknown",
-            "model_name": model_name,
-            "document_key": doc_key,
-            "health_score": score,
-            "previous_health_score": old_score,
-            "health_score_delta": delta,
-            "clashes": clashes,
-            "resolved_clashes": resolved_clashes,
-            "standards": standards,
-            "warnings": warnings,
-            "warning_trends": trends,
-            "fix_first": fixes,
-            "breakdowns": breakdowns,
-            "config_path": CONFIG_PATH,
-            "exports": {"HTML dashboard": html_path, "JSON history": json_path, "CSV clashes": csv_path, "BCF 2.1": bcf_path}
-        }
-        data['review_model_identity'] = model_identity(doc, Process.GetCurrentProcess().Id)
-        data['review_issues'] = attach_references(build_issues(data), describe_review_element)
-        with open_text_compat(json_path, "w") as f:
-            json.dump(data, f, indent=2, ensure_ascii=True, default=str)
-        export_html_dashboard(data, html_path)
+
+def main():
+    global SCAN_PROGRESS
+    if doc is None or doc.IsFamilyDocument:
+        forms.alert('Open a Revit project before scanning.', title='Hamdan', warn_icon=False)
+        return
+    selection = choose_scan()
+    if selection is None:
+        return
+    config, scope = selection
+    try:
+        with forms.ProgressBar(title='Hamdan - Preparing scan', cancellable=True, step=1) as bar:
+            SCAN_PROGRESS = ScanProgress(bar)
+            html_path = run_selected_scan(config, scope)
         try:
             Process.Start('explorer.exe', html_path)
         except Exception:
             pass
-        forms.alert("Complete", title="Run Audit", warn_icon=False)
-    except Exception as ex:
-        error_path = os.path.join(REPORT_DIR, "audit_error_{}.txt".format(run_id))
-        with open_text_compat(error_path, "w") as f:
-            f.write(str(ex) + "\n\n" + traceback.format_exc())
-        forms.alert("Audit failed:\n{}\n\nError log:\n{}".format(ex, error_path), title="BIM Audit Error")
+        forms.alert('Complete', title='Run Audit', warn_icon=False)
+    except ScanCancelled:
+        forms.alert('Scan cancelled.', title='Hamdan', warn_icon=False)
+    except Exception as error:
+        error_path = os.path.join(REPORT_DIR, 'audit_error_{}.txt'.format(datetime.now().strftime('%Y%m%d_%H%M%S_%f')))
+        with open_text_compat(error_path, 'w') as handle:
+            handle.write(str(error) + '\n\n' + traceback.format_exc())
+        forms.alert('Audit failed:\n{}\n\nError log:\n{}'.format(error, error_path), title='Hamdan')
+    finally:
+        SCAN_PROGRESS = None
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

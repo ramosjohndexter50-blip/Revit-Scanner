@@ -29,6 +29,21 @@ The audit is read-only: it creates reports but never adds, edits, or deletes Rev
 
 ## Reports and configuration
 
+**Run Audit** first offers three scan modes:
+
+- **Quick Scan**: warnings, naming/parameter completeness, model health, and duplicate checks; skips clashes and their CSV/BCF exports.
+- **Clash Scan**: choose configured pairs or a discipline preset, then choose all levels or a single level band. Presets also ask for a clearance tolerance in millimetres. Elements crossing a selected level band are included.
+- **Full Audit**: health checks plus the category-pair clash rules from your configuration, across all levels.
+
+The progress bar shows the current stage and elapsed time. **Cancel** stops at the
+next checkpoint between Revit API operations; a cancelled scan is not saved as
+completed audit history. Native bounding-box prefilters restrict clash comparisons
+to nearby candidates in the selected categories. Findings still require visual
+review. The HTML marks checks excluded from the chosen mode as **Not scanned**.
+Scores and trends are compared only against previous scans with the same mode,
+level, discipline preset and configuration. The first run of a new scope starts
+a new baseline.
+
 The first scan creates this local folder and opens the timestamped HTML dashboard in your default browser:
 
 `Documents/RevitScanner/reports`
