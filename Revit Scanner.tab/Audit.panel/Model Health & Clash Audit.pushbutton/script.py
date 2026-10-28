@@ -1109,6 +1109,7 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
 <div class="two"><section><h2>Warning Trends</h2>{trend_table}</section><section><h2>Report Files</h2>{exports}<p class="note">JSON keeps local audit history. CSV and BCF are available for coordination workflows.</p></section></div>
 <div class="two"><section><h2>Top 10 Fix First</h2>{fix_table}</section><section><h2>Clashes by Discipline</h2>{discipline_table}</section></div>
 <div class="two"><section><h2>Model Health Inventory</h2>{health_table}</section><section><h2>Clashes by Level</h2>{level_table}</section></div>
+<section style="margin-top:18px"><h2>Required Parameter Completeness</h2>{parameter_table}</section>
 <section style="margin-top:18px"><h2>Scan Notes</h2><p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
 <div class="footer">Generated locally by Revit Scanner. No cloud service or AI API was used.</div></main></body></html>""".format(
         model=html_escape(str(data.get("model_name", "Untitled"))), timestamp=html_escape(str(data.get("timestamp", ""))),
@@ -1119,7 +1120,13 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
         fix_table=html_table(["#", "Recommendation", "Items", "Impact", "Details"], fix_rows),
         discipline_table=html_table(["Discipline", "Elements", "Hard", "Clearance"], discipline_rows),
         level_table=html_table(["Level", "Elements", "Hard", "Clearance"], level_rows),
-        health_table=html_table(["Metric", "Result"], health_rows)
+        health_table=html_table(["Metric", "Result"], health_rows),
+        parameter_table=html_table(["Category", "Elements", "Filled", "Missing Values"], [
+            (item.get("category", ""), item.get("element_count", 0),
+             "{}%".format(item.get("filled_percent", 0)) if item.get("element_count", 0) else "N/A - no elements",
+             len(item.get("missing", [])))
+            for item in data.get("standards", {}).get("required_parameters", [])
+        ])
     )
     with io.open(path, "w", encoding="utf-8") as html_file:
         html_file.write(html)
@@ -1780,7 +1787,6 @@ def main():
         with open_text_compat(json_path, "w") as f:
             json.dump(data, f, indent=2, ensure_ascii=True, default=str)
         export_html_dashboard(data, html_path)
-        print_report(data)
         try:
             Process.Start('explorer.exe', html_path)
         except Exception:
