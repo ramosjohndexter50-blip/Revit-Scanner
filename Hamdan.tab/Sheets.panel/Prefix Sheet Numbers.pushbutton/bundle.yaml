@@ -1,3 +1,3 @@
-title: Prefix Sheet Numbers
-tooltip: Add a prefix to selected sheet numbers after preview and confirmation.
+title: Number Formatter
+tooltip: Format selected sheet or room numbers with custom patterns, start, increment, ordering, padding, and a preview before Apply.
 author: Hamdan

@@ -1,0 +1,54 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Hamdan - Number Formatter" Width="1000" Height="720" MinWidth="850" MinHeight="620"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False" Background="#F3F6FA">
+    <Window.Resources>
+        <Style TargetType="TextBox"><Setter Property="Padding" Value="8,5"/><Setter Property="Margin" Value="0,4,12,10"/></Style>
+        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#1D2939"/></Style>
+        <Style TargetType="Button"><Setter Property="Padding" Value="16,8"/><Setter Property="Margin" Value="8,0,0,0"/></Style>
+    </Window.Resources>
+    <Grid Margin="22" Background="#F3F6FA">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14">
+            <TextBlock Text="Number Formatter" FontSize="24" FontWeight="SemiBold"/>
+            <TextBlock x:Name="target_text" Margin="0,5,0,0"/>
+        </StackPanel>
+        <StackPanel Grid.Row="1">
+            <TextBlock Text="Format pattern" FontWeight="SemiBold"/>
+            <TextBox x:Name="format_box" TextChanged="settings_changed" FontSize="17"/>
+            <TextBlock Text="Fields: {floor}  {tower}  {n}  {old}  {name}. Use {n:02} for 01, 02, 03."
+                       FontSize="12" Foreground="#475569" Margin="0,0,0,8"/>
+            <TextBlock Text="Examples: {floor}{tower}-{n:02}  or  {n:02}-{floor}{tower}  or  A-{old}"
+                       FontSize="12" Foreground="#475569" Margin="0,0,0,14"/>
+        </StackPanel>
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/><ColumnDefinition Width="2*"/></Grid.ColumnDefinitions>
+            <StackPanel><TextBlock Text="Floor code"/><TextBox x:Name="floor_box" TextChanged="settings_changed"/></StackPanel>
+            <StackPanel Grid.Column="1"><TextBlock Text="Tower code"/><TextBox x:Name="tower_box" TextChanged="settings_changed"/></StackPanel>
+            <StackPanel Grid.Column="2"><TextBlock Text="Start number"/><TextBox x:Name="start_box" TextChanged="settings_changed"/></StackPanel>
+            <StackPanel Grid.Column="3"><TextBlock Text="Increment"/><TextBox x:Name="step_box" TextChanged="settings_changed" ToolTip="1 counts up by one, 2 by two, -1 counts down."/></StackPanel>
+            <StackPanel Grid.Column="4"><TextBlock Text="Assign in this order"/><ComboBox x:Name="order_box" Margin="0,4,0,10" Padding="8,5" SelectionChanged="settings_changed"/></StackPanel>
+        </Grid>
+        <TextBlock Grid.Row="3" Text="Preview - only selected sheets or rooms will be updated" FontWeight="SemiBold" Margin="0,8,0,10"/>
+        <ListView Grid.Row="4" x:Name="preview_list" Background="White" Foreground="#172B4D" BorderBrush="#CBD5E1">
+            <ListView.View><GridView>
+                <GridViewColumn Header="#" Width="40" DisplayMemberBinding="{Binding Order}"/>
+                <GridViewColumn Header="Current number" Width="150" DisplayMemberBinding="{Binding Current}"/>
+                <GridViewColumn Header="New number" Width="180" DisplayMemberBinding="{Binding Proposed}"/>
+                <GridViewColumn Header="Name" Width="290" DisplayMemberBinding="{Binding Name}"/>
+                <GridViewColumn Header="Level" Width="130" DisplayMemberBinding="{Binding Level}"/>
+                <GridViewColumn Header="Element ID" Width="110" DisplayMemberBinding="{Binding ElementId}"/>
+            </GridView></ListView.View>
+        </ListView>
+        <StackPanel Grid.Row="5" Margin="0,12,0,0">
+            <TextBlock x:Name="status_text" TextWrapping="Wrap" Margin="0,0,0,12"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="Cancel" Click="cancel_clicked"/>
+                <Button x:Name="apply_button" Content="Apply changes" IsEnabled="False" Background="#175CD3" Foreground="White" Click="apply_clicked"/>
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>

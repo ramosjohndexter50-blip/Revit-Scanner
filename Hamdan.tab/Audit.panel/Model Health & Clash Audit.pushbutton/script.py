@@ -964,7 +964,7 @@ def discipline_name(cat):
 
 
 def breakdown_tables(elements, clashes):
-    per_level, per_discipline = {}, {}
+    per_level, per_discipline, per_category = {}, {}, {}
     for el in elements:
         scan_tick()
         level = get_level_name(el)
@@ -974,6 +974,15 @@ def breakdown_tables(elements, clashes):
         disc = discipline_name(cat)
         per_discipline.setdefault(disc, {"elements": 0, "hard_clashes": 0, "clearance_clashes": 0})
         per_discipline[disc]["elements"] += 1
+        category = per_category.setdefault(cat or category_key(el), {
+            'name': category_key(el), 'group': disc, 'records': 0, 'samples': []})
+        category['records'] += 1
+        if len(category['samples']) < 5:
+            try:
+                category['samples'].append(describe_element(doc, el,
+                    name_getter=lambda item: Element.Name.GetValue(item)))
+            except Exception:
+                category['samples'].append({'id': element_id_value(el.Id), 'display_name': 'Name unavailable'})
     for c in clashes:
         for rec in (c["element_a"], c["element_b"]):
             level = rec.get("level", "Unassigned")
@@ -981,7 +990,7 @@ def breakdown_tables(elements, clashes):
             key = "hard_clashes" if c["kind"] == "Hard" else "clearance_clashes"
             per_level.setdefault(level, {"elements": 0, "hard_clashes": 0, "clearance_clashes": 0})[key] += 1
             per_discipline.setdefault(disc, {"elements": 0, "hard_clashes": 0, "clearance_clashes": 0})[key] += 1
-    return {"per_level": per_level, "per_discipline": per_discipline}
+    return {"per_level": per_level, "per_discipline": per_discipline, 'per_category': per_category}
 
 
 def export_clashes_csv(clashes, path):
@@ -1136,6 +1145,23 @@ def export_html_dashboard(data, path):
     elapsed = int(data.get('elapsed_seconds', 0))
     delta_label = ('{:+}'.format(data.get('health_score_delta', 0))
                    if data.get('previous_health_score') is not None else 'First scan for this scope')
+    if mode == 'Quick Scan':
+        group_table = html_table(['Category group', 'Active-model records'],
+                                [(row[0], row[1]) for row in discipline_rows])
+        by_level_table = html_table(['Level', 'Active-model records'], [(row[0], row[1]) for row in level_rows])
+    else:
+        group_table = html_table(['Category group', 'Records', 'Hard involvements', 'Clearance involvements'], discipline_rows)
+        by_level_table = html_table(['Level', 'Records', 'Hard involvements', 'Clearance involvements'], level_rows)
+    category_rows = []
+    for key, item in sorted(data.get('breakdowns', {}).get('per_category', {}).items()):
+        names = u'; '.join(u'{} [ID {}]'.format(ref.get('display_name', ''), ref['id'])
+                           for ref in item.get('samples', []))
+        category_rows.append((item['name'], key, item['group'], item['records'], names))
+    categories_table = (html_table(['Revit category', 'Category key', 'Group', 'Records', 'Sample names / IDs (up to 5)'], category_rows)
+                        if category_rows else 'Run a new scan to record the category breakdown.')
+    source_note = ('Source: active RVT records only. Revit link instances: {} ({} loaded). '.format(
+        len(health.get('links', [])), loaded_links) if mode != 'Clash Scan' else 'Source: active RVT clash candidates only. ')
+    source_note += 'Groups such as Electrical are inferred from Revit categories; they do not indicate linked disciplines.'
     html = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Hamdan Audit</title><style>
 body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1d2939}}.top{{background:#111c2b;color:white;padding:28px 42px}}.top h1{{margin:0;font-size:28px}}.top p{{margin:7px 0 0;color:#b9c6d8}}.wrap{{max-width:1420px;margin:24px auto;padding:0 24px}}.grid{{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:16px}}.card,section{{background:white;border:1px solid #e4eaf2;border-radius:12px;padding:20px;box-shadow:0 3px 12px #172b4d0d}}.metric{{font-size:32px;font-weight:700;margin-top:9px}}.label{{color:#667085;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}}.good{{color:#039855}}.warn{{color:#dc6803}}.bad{{color:#d92d20}}.two{{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}}h2{{font-size:18px;margin:0 0 14px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th{{text-align:left;background:#f8fafc;color:#475467}}td,th{{padding:10px;border-bottom:1px solid #eaecf0;vertical-align:top}}.export{{display:inline-block;margin:4px 8px 4px 0;padding:9px 12px;border-radius:7px;background:#e8f1ff;color:#175cd3;text-decoration:none;font-weight:600}}.note{{font-size:12px;color:#667085;margin-top:14px}}.footer{{color:#667085;padding:25px 0;font-size:12px}}@media(max-width:850px){{.grid,.two{{grid-template-columns:1fr}}}}</style></head>
@@ -1143,8 +1169,9 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
 <section style="margin-bottom:18px"><h2>{scope_label}</h2><p class="note">Elapsed: {elapsed_label}. Score and trends apply to this scan scope only. Level scans include elements crossing the selected level band. Clash-only breakdowns cover the detected candidates.</p></section>
 <div class="grid"><div class="card"><div class="label">Scan Health Score</div><div class="metric {score_class}">{score}/100</div><div class="note">Delta: {delta_label}</div></div><div class="card"><div class="label">Hard Clashes</div><div class="metric bad">{hard}</div></div><div class="card"><div class="label">Clearance Candidates</div><div class="metric warn">{clearance}</div></div><div class="card"><div class="label">Revit Warning Groups</div><div class="metric">{warnings}</div></div></div>
 <div class="two"><section><h2>Warning Trends</h2>{trend_table}</section><section><h2>Report Files</h2>{exports}<p class="note">Files for this scan. JSON stores history for the selected scope; clash scans also export CSV and BCF.</p></section></div>
-<div class="two"><section><h2>Top 10 Fix First</h2>{fix_table}</section><section><h2>Clashes by Discipline</h2>{discipline_table}</section></div>
-<div class="two"><section><h2>Model Health Inventory</h2>{health_table}</section><section><h2>Clashes by Level</h2>{level_table}</section></div>
+<div class="two"><section><h2>Top 10 Fix First</h2>{fix_table}</section><section><h2>Active-model Category Groups</h2><p class="note">{source_note}</p>{discipline_table}</section></div>
+<div class="two"><section><h2>Model Health Inventory</h2>{health_table}</section><section><h2>Active-model Level Breakdown</h2>{level_table}</section></div>
+<section style="margin-top:18px;overflow:auto"><h2>Category Breakdown</h2><p class="note">These counts show categorized records in the current model, not linked model contents or exclusively physical objects. Samples identify what each group contains.</p>{categories_table}</section>
 <section style="margin-top:18px"><h2>Required Parameter Completeness</h2>{parameter_table}</section>
 <section style="margin-top:18px;overflow:auto"><h2>Review Issues</h2><p class="note">In Revit, use Hamdan &gt; Audit &gt; Review Issues to select and zoom to an affected element. Search by severity, level, description or Element ID.</p>{issues_table}</section>
 <section style="margin-top:18px"><h2>Scan Notes</h2><p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
@@ -1156,8 +1183,8 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
         trend_table=html_table(["New", "Resolved", "Unchanged"], [(trend_counts["NEW"], trend_counts["RESOLVED"], trend_counts["UNCHANGED"])]),
         exports="".join(export_links),
         fix_table=html_table(["#", "Recommendation", "Items", "Impact", "Details"], fix_rows),
-        discipline_table=html_table(["Discipline", "Elements", "Hard", "Clearance"], discipline_rows),
-        level_table=html_table(["Level", "Elements", "Hard", "Clearance"], level_rows),
+        discipline_table=group_table, level_table=by_level_table,
+        source_note=html_escape(source_note), categories_table=categories_table,
         health_table=html_table(["Metric", "Result"], health_rows) if mode != 'Clash Scan' else 'Not included in this scan.',
         parameter_table=html_table(["Category", "Elements", "Filled", "Missing Values"], [
             (item.get("category", ""), item.get("element_count", 0),

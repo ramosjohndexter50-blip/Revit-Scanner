@@ -1,6 +1,6 @@
 # Hamdan
 
-A standalone, scan-only pyRevit extension for model-health and clash auditing.
+A pyRevit extension for model-health auditing, clash review, and sheet/room numbering.
 
 ## What it checks
 
@@ -44,6 +44,11 @@ Scores and trends are compared only against previous scans with the same mode,
 level, discipline preset and configuration. The first run of a new scope starts
 a new baseline.
 
+Quick Scan's **Active-model Category Groups** table counts records in the open RVT.
+An Electrical or Mechanical group does not mean another model is linked. The
+**Category Breakdown** table lists the exact Revit categories, counts, and up to
+five sample element names/IDs per category. Link instance counts are shown separately.
+
 The first scan creates this local folder and opens the timestamped HTML dashboard in your default browser:
 
 `Documents/RevitScanner/reports`
@@ -76,6 +81,31 @@ rows. **Remove from list** and **Clear list** only affect this window's rows. Th
 window belongs to the model it was opened for; locating elements requires that
 model to be active. Deleted elements are skipped. Family/type labels are also
 included in Review Issues and the next generated HTML audit report.
+
+## Custom sheet and room numbering
+
+Open **Hamdan > Sheets > Number Formatter** (replaces the old Prefix Sheet Numbers
+label). Choose **Sheets** or **Rooms**, select the items to number, then edit the
+pattern in the live preview:
+
+| Pattern | Floor | Tower | Start / Increment | Output |
+| --- | --- | --- | --- | --- |
+| `{floor}{tower}-{n:02}` | G | A | 3 / 1 | GA-03, GA-04, GA-05 |
+| `{n:02}-{floor}{tower}` | G | A | 3 / 1 | 03-GA, 04-GA, 05-GA |
+| `{tower}-{n:03}` | blank | B | 10 / 2 | B-010, B-012, B-014 |
+| `A-{old}` | blank | blank | any / 1 | Add A- to existing numbers |
+
+Codes are entered manually. `{name}` inserts the current sheet or room name. Set
+the assignment order to current number (natural order), name, or Element ID. A
+negative increment counts down, provided the sequence stays zero or greater.
+
+**Apply** is enabled only when the preview is valid and has changes. The tool
+blocks duplicate generated values, collisions with unselected numbers, and
+read-only fields. Sheet numbers must be unique; room conflict checks are grouped
+by created phase. Existing selected values can be swapped using temporary numbers
+inside one transaction. A failed assignment rolls back the transaction. **Cancel**
+closes the preview without changing the project. Revit validates any additional
+restrictions on the generated text when applying the numbers.
 
 ## Important limitations
 
