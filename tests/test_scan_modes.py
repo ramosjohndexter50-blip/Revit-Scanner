@@ -121,7 +121,7 @@ class ScanModeTests(unittest.TestCase):
         self.assertEqual([], data)
 
     def test_html_marks_skipped_checks_and_scope(self):
-        ns = {'io': io, 'html_escape': escape}
+        ns = {'io': io, 'html_escape': escape, 'text_type': str}
         extract_functions(AUDIT, ('report_file_link', 'html_table', 'export_html_dashboard'), ns)
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'report.html'

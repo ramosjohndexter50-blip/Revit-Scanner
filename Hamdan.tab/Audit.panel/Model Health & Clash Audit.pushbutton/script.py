@@ -43,11 +43,12 @@ from Autodesk.Revit.DB import (
     BuiltInCategory, BuiltInParameter, ElementId, FilteredElementCollector,
     FamilyInstance, IndependentTag, Level, RevitLinkInstance, View3D,
     ViewType, XYZ, BoundingBoxXYZ, WorksetKind, WorksetId,
-    WorksetTable, WorksetVisibility, UnitUtils, BoundingBoxIntersectsFilter, Outline
+    WorksetTable, WorksetVisibility, UnitUtils, BoundingBoxIntersectsFilter, Outline, Element
 )
 from System.Diagnostics import Process
 from System import Int64
 from hamdan_issues import attach_references, build_issues, model_identity
+from hamdan_elements import describe_element, text_type
 from hamdan_scan import (PRESETS, ScanCancelled, ScanProgress, pair_rules, preset_config,
                          scope_record, in_level_band, classify_pair)
 
@@ -246,17 +247,11 @@ def get_type_name(element):
 
 def get_element_record(element):
     bbox = get_bbox(element)
-    return {
-        "id": element_id_value(element.Id),
-        "unique_id": str(getattr(element, "UniqueId", "")),
-        "category": category_bic_name(element),
-        "category_name": category_key(element),
-        "name": str(getattr(element, "Name", "")),
-        "type": get_type_name(element),
-        "level": get_level_name(element),
-        "workset": get_workset_name(element),
-        "bbox_internal": list(bbox) if bbox else None
-    }
+    record = describe_element(doc, element, name_getter=lambda item: Element.Name.GetValue(item),
+                              level_getter=get_level_name)
+    record.update({'category': category_bic_name(element), 'workset': get_workset_name(element),
+                   'bbox_internal': list(bbox) if bbox else None})
+    return record
 
 
 def describe_review_element(value):
@@ -1087,11 +1082,11 @@ def report_file_link(path):
 
 
 def html_table(headers, rows):
-    head = "".join("<th>{}</th>".format(html_escape(str(value))) for value in headers)
+    head = "".join("<th>{}</th>".format(html_escape(text_type(value))) for value in headers)
     body = []
     for row in rows:
         body.append("<tr>{}</tr>".format("".join(
-            "<td>{}</td>".format(html_escape(str(value))) for value in row
+            "<td>{}</td>".format(html_escape(text_type(value))) for value in row
         )))
     return "<table><thead><tr>{}</tr></thead><tbody>{}</tbody></table>".format(head, "".join(body))
 
@@ -1154,7 +1149,7 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
 <section style="margin-top:18px;overflow:auto"><h2>Review Issues</h2><p class="note">In Revit, use Hamdan &gt; Audit &gt; Review Issues to select and zoom to an affected element. Search by severity, level, description or Element ID.</p>{issues_table}</section>
 <section style="margin-top:18px"><h2>Scan Notes</h2><p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
 <div class="footer">Generated locally by Hamdan. No cloud service or AI API was used.</div></main></body></html>""".format(
-        model=html_escape(str(data.get("model_name", "Untitled"))), timestamp=html_escape(str(data.get("timestamp", ""))),
+        model=html_escape(text_type(data.get("model_name", "Untitled"))), timestamp=html_escape(text_type(data.get("timestamp", ""))),
         score=score, score_class=score_class, delta_label=html_escape(delta_label), hard=hard,
         clearance=clearance, warnings=warning_count, scope_label=html_escape(scope_label),
         elapsed_label='{}m {:02d}s'.format(elapsed // 60, elapsed % 60),
@@ -1170,9 +1165,11 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
              len(item.get("missing", [])))
             for item in data.get("standards", {}).get("required_parameters", [])
         ]) if mode != 'Clash Scan' else 'Not included in this scan.',
-        issues_table=html_table(["Issue ID", "Severity", "Type", "Status", "Level", "Element IDs", "Finding", "Suggested Fix"], [
+        issues_table=html_table(["Issue ID", "Severity", "Type", "Status", "Level", "Element IDs", "Element Names", "Finding", "Suggested Fix"], [
             (item['issue_id'], item['severity'], item['kind'], item['status'], item['level'],
-             ', '.join(str(value) for value in item['element_ids']), item['message'], item['suggested_fix'])
+             ', '.join(str(value) for value in item['element_ids']),
+             ' / '.join(ref.get('display_name') or ref.get('name', '') for ref in item.get('element_refs', [])),
+             item['message'], item['suggested_fix'])
             for item in data.get('review_issues', [])
         ])
     )

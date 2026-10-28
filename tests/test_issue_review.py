@@ -82,7 +82,7 @@ class IssueReviewTests(unittest.TestCase):
             self.assertIsNone(latest_model_report(folder, dict(identity, path='other.rvt')))
 
     def test_html_issue_register_escapes_content(self):
-        namespace = {'io': io, 'html_escape': escape}
+        namespace = {'io': io, 'html_escape': escape, 'text_type': str}
         extract_functions(AUDIT, ('report_file_link', 'html_table', 'export_html_dashboard'), namespace)
         data = {'review_issues': build_issues({'standards': {'naming_issues': [
             {'name': '<script>alert(1)</script>', 'element_id': 50, 'message': 'Invalid name'}]}})}

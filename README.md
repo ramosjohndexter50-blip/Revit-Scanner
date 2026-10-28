@@ -63,6 +63,20 @@ projects require a fresh audit after reopening Revit. Project/configuration chec
 without element references remain reviewable but cannot be zoomed to. This action
 changes only selection and the active view, with no edits to model geometry or parameters.
 
+## Live Element List
+
+Open **Hamdan > Elements > Element List** and leave the window open. Clicking
+elements in Revit adds named rows automatically: family, type, category, level,
+and Element ID. A window such as `W-Aluminum_Fixed_Exterior` is shown with its
+type, for example `1200 x 3180`. Repeated clicks update the same row instead of
+adding duplicates. The list is kept while the window is open, with a 2,000-row limit.
+
+Search by name or ID, pause **Live capture**, or use **Select & Zoom** on selected
+rows. **Remove from list** and **Clear list** only affect this window's rows. The
+window belongs to the model it was opened for; locating elements requires that
+model to be active. Deleted elements are skipped. Family/type labels are also
+included in Review Issues and the next generated HTML audit report.
+
 ## Important limitations
 
 - Clash findings are bounding-box coordination candidates; verify them visually before resolution.

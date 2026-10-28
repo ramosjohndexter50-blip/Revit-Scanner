@@ -1,0 +1,54 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Hamdan - Element List" Width="1100" Height="550" MinWidth="760" MinHeight="350"
+        WindowStartupLocation="CenterScreen" ShowInTaskbar="False" Background="#F3F6FA">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="14,8"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="Foreground" Value="#172B4D"/>
+            <Setter Property="BorderBrush" Value="#CBD5E1"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="18" Background="#F3F6FA">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Text="Hamdan | Element List" FontSize="23" FontWeight="SemiBold" Foreground="#13253E"/>
+            <TextBlock x:Name="model_text" Margin="0,5,0,3" Foreground="#475569"/>
+            <TextBlock Text="Click elements in Revit to add them here. Family and type names are captured automatically."
+                       Margin="0,0,0,12" Foreground="#475569"/>
+        </StackPanel>
+        <DockPanel Grid.Row="1" Margin="0,0,0,12">
+            <CheckBox x:Name="capture_toggle" Content="Live capture" IsChecked="True" VerticalAlignment="Center"
+                      DockPanel.Dock="Right" Margin="16,0,0,0" Foreground="#172B4D"/>
+            <TextBox x:Name="search_box" Height="32" Padding="8,4" VerticalContentAlignment="Center"
+                     ToolTip="Search by family, type, category, level or Element ID" TextChanged="search_changed"/>
+        </DockPanel>
+        <ListView Grid.Row="2" x:Name="element_list" SelectionMode="Extended" Background="White"
+                  BorderBrush="#D9E2EC" Foreground="#172B4D" HorizontalContentAlignment="Stretch">
+            <ListView.View>
+                <GridView>
+                    <GridViewColumn Header="Element name" Width="330" DisplayMemberBinding="{Binding DisplayName}"/>
+                    <GridViewColumn Header="Category" Width="140" DisplayMemberBinding="{Binding Category}"/>
+                    <GridViewColumn Header="Family" Width="190" DisplayMemberBinding="{Binding Family}"/>
+                    <GridViewColumn Header="Type" Width="155" DisplayMemberBinding="{Binding Type}"/>
+                    <GridViewColumn Header="Level" Width="105" DisplayMemberBinding="{Binding Level}"/>
+                    <GridViewColumn Header="Element ID" Width="100" DisplayMemberBinding="{Binding ElementId}"/>
+                </GridView>
+            </ListView.View>
+        </ListView>
+        <StackPanel Grid.Row="3" Margin="0,12,0,0">
+            <TextBlock x:Name="status_text" Text="Click an element in the model to begin." Foreground="#475569"
+                       TextWrapping="Wrap" Margin="0,0,0,10"/>
+            <StackPanel Orientation="Horizontal">
+                <Button Content="Select &amp; Zoom" Click="locate_clicked" Background="#175CD3" Foreground="White"/>
+                <Button Content="Remove from list" Click="remove_clicked"/>
+                <Button Content="Clear list" Click="clear_clicked"/>
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>

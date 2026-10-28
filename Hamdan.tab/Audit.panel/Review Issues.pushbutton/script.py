@@ -2,12 +2,13 @@
 """Review a saved audit in a modal picker, then locate an issue in the active RVT."""
 import os
 
-from pyrevit import forms, revit
+from pyrevit import DB, forms, revit
 from Autodesk.Revit.DB import ElementId, View
 from System.Collections.Generic import List
 from System.Diagnostics import Process
 
 from hamdan_issues import latest_model_report, model_identity
+from hamdan_elements import describe_element
 
 
 class IssueOption(forms.TemplateListItem):
@@ -15,15 +16,16 @@ class IssueOption(forms.TemplateListItem):
     def name(self):
         row = self.item
         ids = ', '.join(str(value) for value in row.get('element_ids', [])) or 'Project check'
-        return '[{}] {} | {} | {} | IDs: {}'.format(
-            row['severity'], row['kind'], row.get('level', 'Not assigned'), row['message'], ids)
+        names = ' / '.join(ref.get('display_name') or ref.get('name', '') for ref in row.get('element_refs', []))
+        return u'[{}] {} | {} | {} | {} | IDs: {}'.format(
+            row['severity'], row['kind'], row.get('level', 'Not assigned'), names, row['message'], ids)
 
     @property
     def description(self):
         row = self.item
         refs = row.get('element_refs', [])
-        elements = '\n'.join('{} | {} | {} | {}'.format(
-            ref['id'], ref.get('category_name', ''), ref.get('name', ''), ref.get('level', '')) for ref in refs)
+        elements = u'\n'.join(u'{} | {} | {} | {}'.format(
+            ref['id'], ref.get('category_name', ''), ref.get('display_name') or ref.get('name', ''), ref.get('level', '')) for ref in refs)
         return ('{}\n\nSeverity: {}\nStatus: {}\nLevel: {}\n\nAffected elements:\n{}'
                 '\n\nSuggested fix:\n{}').format(
                     row['message'], row['severity'], row['status'], row.get('level', 'Not assigned'),
@@ -86,6 +88,17 @@ def main():
     if not issues:
         forms.alert('No review issues were recorded in the latest audit for this model.', title='Hamdan', warn_icon=False)
         return
+    # Upgrade readable labels in older compatible reports in memory only.
+    for issue in issues:
+        for ref in issue.get('element_refs', []):
+            if not ref.get('display_name') and ref.get('unique_id'):
+                try:
+                    element = revit.doc.GetElement(ref['unique_id'])
+                    if element is not None:
+                        ref.update(describe_element(revit.doc, element,
+                                   name_getter=lambda item: DB.Element.Name.GetValue(item)))
+                except Exception:
+                    pass
     options = [IssueOption(row) for row in issues]
     chosen = forms.SelectFromList.show(
         options, title='Hamdan - Review Issues | {} | {}'.format(data.get('model_name', ''), data.get('timestamp', '')),
