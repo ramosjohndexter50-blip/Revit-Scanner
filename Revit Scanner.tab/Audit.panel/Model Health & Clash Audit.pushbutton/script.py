@@ -927,14 +927,14 @@ def export_bcf21(clashes, path, project_name):
             ET.SubElement(camera, "FieldOfView").text = "60"
             ET.SubElement(camera, "AspectRatio").text = "1.7777778"
             with open(os.path.join(topic_dir, "markup.bcf"), "wb") as f:
-                f.write(ET.tostring(root, encoding="utf-8", xml_declaration=True))
+                f.write(ET.tostring(root, encoding="utf-8"))
             with open(os.path.join(topic_dir, "viewpoint.bcfv"), "wb") as f:
-                f.write(ET.tostring(vroot, encoding="utf-8", xml_declaration=True))
+                f.write(ET.tostring(vroot, encoding="utf-8"))
             topic_list.append(topic_guid)
         # Rebuild a single root markup file for the package root.
         root_path = os.path.join(temp_dir, "markup.bcf")
         with open(root_path, "wb") as f:
-            f.write(ET.tostring(root, encoding="utf-8", xml_declaration=True))
+            f.write(ET.tostring(root, encoding="utf-8"))
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(root_path, "markup.bcf")
             for dirpath, _, filenames in os.walk(temp_dir):

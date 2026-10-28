@@ -9,6 +9,10 @@ if doc is None:
     forms.alert('Open a Revit project before running Sheet Audit.', title='Sheet Audit')
 else:
     sheets = list(FilteredElementCollector(doc).OfClass(ViewSheet).ToElements())
+    if not sheets:
+        forms.alert('No sheets exist in this project yet. Create a sheet first in Revit: View > Sheet.',
+                    title='Sheet Audit')
+        raise SystemExit
     titleblocks = list(FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_TitleBlocks).WhereElementIsNotElementType().ToElements())
     viewports = list(FilteredElementCollector(doc).OfClass(Viewport).ToElements())
     titleblock_by_sheet = {}
