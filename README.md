@@ -12,6 +12,7 @@ A standalone, scan-only pyRevit extension for model-health and clash auditing.
 - Naming rules, required-parameter completeness, workset health, link-coordination review, possible duplicates, and performance flags
 - Top ten fixes ranked by estimated Health Score impact
 - Per-level and per-discipline breakdowns
+- Review Issues: searchable findings with severity, Element IDs, level, and suggested fixes; select and zoom to an issue directly in Revit
 
 The audit is read-only: it creates reports but never adds, edits, or deletes Revit model elements.
 
@@ -33,6 +34,19 @@ The first scan creates this local folder and opens the timestamped HTML dashboar
 `Documents/RevitScanner/reports`
 
 It also writes `audit_config.json` there. Edit that file to adjust hard-clash category pairs, clearance tolerances, ignore rules, naming regexes, required parameters, and Health Score weights. The HTML dashboard links to the JSON history, CSV clashes, and BCF package for that audit run.
+
+## Review and locate findings
+
+Run **Hamdan > Audit > Run Audit** once after updating. Then open **Review Issues**.
+Select a row to read its suggested fix in the details panel, or search for a severity,
+level, description, or Element ID. Click **Select & Zoom** to close the picker and
+locate the issue in Revit. A view or sheet finding opens that view directly.
+
+The reviewer uses the latest compatible report for the active model. It resolves
+saved element UniqueIds before selecting; deleted elements are skipped. Unsaved
+projects require a fresh audit after reopening Revit. Project/configuration checks
+without element references remain reviewable but cannot be zoomed to. This action
+changes only selection and the active view, with no edits to model geometry or parameters.
 
 ## Important limitations
 

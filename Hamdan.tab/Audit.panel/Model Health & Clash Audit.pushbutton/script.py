@@ -46,6 +46,8 @@ from Autodesk.Revit.DB import (
     WorksetTable, WorksetVisibility, UnitUtils
 )
 from System.Diagnostics import Process
+from System import Int64
+from hamdan_issues import attach_references, build_issues, model_identity
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -247,6 +249,11 @@ def get_element_record(element):
         "workset": get_workset_name(element),
         "bbox_internal": list(bbox) if bbox else None
     }
+
+
+def describe_review_element(value):
+    element = doc.GetElement(ElementId(Int64(value)))
+    return get_element_record(element) if element is not None else None
 
 
 def get_workset_name(element):
@@ -698,7 +705,8 @@ def document_warnings():
 
 def model_health_inventory(elements):
     """Collect practical project-health metrics without editing the model."""
-    result = {"issues": [], "links": [], "duplicate_marks": [], "unplaced_rooms": [], "unplaced_views": []}
+    result = {"issues": [], "links": [], "duplicate_marks": [], "unplaced_rooms": [], "unplaced_views": [],
+              "imported_cad_elements": []}
     path = getattr(doc, "PathName", "") or ""
     result["model_path"] = path
     result["workshared"] = bool(getattr(doc, "IsWorkshared", False))
@@ -774,6 +782,8 @@ def model_health_inventory(elements):
         imports = FilteredElementCollector(doc).OfClass(import_class).ToElements()
         result["imported_cad_count"] = len([item for item in imports if not getattr(item, "IsLinked", False)])
         result["linked_cad_count"] = len([item for item in imports if getattr(item, "IsLinked", False)])
+        result["imported_cad_elements"] = [{"id": element_id_value(item.Id), "name": item.Name}
+                                            for item in imports if not getattr(item, "IsLinked", False)]
         if result["imported_cad_count"]:
             result["issues"].append({"type": "imported_cad", "severity": "MEDIUM", "count": result["imported_cad_count"],
                                      "message": "{} imported CAD instance(s) found; review whether linking is more appropriate.".format(result["imported_cad_count"])})
@@ -1110,6 +1120,7 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
 <div class="two"><section><h2>Top 10 Fix First</h2>{fix_table}</section><section><h2>Clashes by Discipline</h2>{discipline_table}</section></div>
 <div class="two"><section><h2>Model Health Inventory</h2>{health_table}</section><section><h2>Clashes by Level</h2>{level_table}</section></div>
 <section style="margin-top:18px"><h2>Required Parameter Completeness</h2>{parameter_table}</section>
+<section style="margin-top:18px;overflow:auto"><h2>Review Issues</h2><p class="note">In Revit, use Hamdan &gt; Audit &gt; Review Issues to select and zoom to an affected element. Search by severity, level, description or Element ID.</p>{issues_table}</section>
 <section style="margin-top:18px"><h2>Scan Notes</h2><p class="note">Clashes are bounding-box candidates. Verify them visually in Revit before resolution. This report supports QA and coordination but is not BIM Level 3 certification.</p></section>
 <div class="footer">Generated locally by Hamdan. No cloud service or AI API was used.</div></main></body></html>""".format(
         model=html_escape(str(data.get("model_name", "Untitled"))), timestamp=html_escape(str(data.get("timestamp", ""))),
@@ -1126,6 +1137,11 @@ body{{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f3f6fa;color:#1
              "{}%".format(item.get("filled_percent", 0)) if item.get("element_count", 0) else "N/A - no elements",
              len(item.get("missing", [])))
             for item in data.get("standards", {}).get("required_parameters", [])
+        ]),
+        issues_table=html_table(["Issue ID", "Severity", "Type", "Status", "Level", "Element IDs", "Finding", "Suggested Fix"], [
+            (item['issue_id'], item['severity'], item['kind'], item['status'], item['level'],
+             ', '.join(str(value) for value in item['element_ids']), item['message'], item['suggested_fix'])
+            for item in data.get('review_issues', [])
         ])
     )
     with io.open(path, "w", encoding="utf-8") as html_file:
@@ -1783,6 +1799,8 @@ def main():
             "config_path": CONFIG_PATH,
             "exports": {"HTML dashboard": html_path, "JSON history": json_path, "CSV clashes": csv_path, "BCF 2.1": bcf_path}
         }
+        data['review_model_identity'] = model_identity(doc, Process.GetCurrentProcess().Id)
+        data['review_issues'] = attach_references(build_issues(data), describe_review_element)
         with open_text_compat(json_path, "w") as f:
             json.dump(data, f, indent=2, ensure_ascii=True, default=str)
         export_html_dashboard(data, html_path)
