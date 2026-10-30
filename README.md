@@ -35,12 +35,54 @@ All commands are in the **Hamdan** tab, arranged from left to right:
 
 | Group | Tools |
 | --- | --- |
-| Sheet | Sheet Manager, Create Sheets, Number Formatter, Sheet Layout, Sheet Audit |
+| Sheet | Sheet Manager, Create Sheets, Number Formatter, Add Dimensions, Sheet Layout, Sheet Audit |
 | Model | Element List, Batch Parameters, Dimensions & Tags |
 | QA | Run Audit, Review Issues, Open Dashboard, BEP Profiles |
 
 Number Formatter still supports both sheets and rooms. Dimensions & Tags includes
 its existing scan and edit options. Moving commands does not change their scope.
+
+## Add dimensions from a sheet
+
+Open **Hamdan > Sheet > Add Dimensions** and choose a selection mode.
+
+**Pick faces/edges on sheet** is intended for cabinet and interior-elevation details.
+Double-click the viewport on the sheet first, then start the tool. If starting on an
+unactivated sheet, the tool selects the viewport and posts Revit's Activate View command;
+click Add Dimensions again after activation. Manual mode does not open a separate model-view
+tab. It can also operate in an already open model view that is placed on a sheet.
+
+Choose a linear style, Horizontal/Vertical/Both, Overall/Chain, and outside placement.
+For width above and heights on the left, choose **Above / Left**. Offset is in **paper
+millimetres**: 5 mm at 1:100 means a 500 mm model-space offset. Pick the exact planar
+faces or straight edges, use Tab to cycle references, then click **Finish**. Review the
+picked references and skipped selections, then **Apply changes**. Only those selected
+references participate; unpicked shelves, trims and other family faces are excluded.
+
+Supported host categories include walls, straight grids, columns, doors/windows,
+Casework, Furniture, Generic Models and equipment. Manual references are matched back
+to original transformed family/solid geometry. Curved/oblique edges, meshes, linked
+elements and family reference planes without resolvable original geometry are excluded.
+Overall uses the two outermost selected references; Chain keeps all distinct selected
+positions. Up to 128 picked references are accepted. Unsupported picks are reported.
+
+**Automatic from selected elements** retains the original workflow: choose a sheet/view,
+open its model view, select up to 200 elements and Finish. This mode includes all qualifying
+parallel faces/grids on the selected elements, which can include extra family detail.
+Bounding boxes or original grid curves only position the dimension line; they never
+replace the real geometric anchors.
+
+Apply creates one dimension per usable direction in one atomic transaction. Cancel
+creates nothing. The selected viewport, view and references are rechecked before writing.
+A stale/deleted target, repeated reference set, invalid measurement or Revit creation
+failure cancels the batch. Dimensions belong to the model view and appear wherever that
+view is placed, rotating with the viewport. Check annotation crop if placement is outside
+the visible area. A successful batch can be undone using Revit Undo.
+
+The tool does not apply EQ constraints, resize geometry, override measurements, or create
+FFL symbols, tags or material notes. Those are separate annotation actions. The cabinet
+QA fixture verifies a 1015 mm width and a 900 / 25 / 600 / 975 mm vertical chain from seven
+picked native edges; it does not certify every joinery family or the full reference drawing.
 
 ## Reports and configuration
 

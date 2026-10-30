@@ -1,0 +1,3 @@
+title: Add Dimensions
+tooltip: Activate a viewport on the sheet, then pick exact cabinet/building faces or straight edges for reviewed Overall/Chain dimensions. Supports casework, furniture and equipment. Automatic selected-element mode is also available.
+context: doc-project

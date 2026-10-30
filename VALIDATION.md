@@ -1,5 +1,46 @@
 # Verification boundary
 
+## Manual sheet-viewport cabinet dimensions, 2026-10-30
+
+110 portable regressions pass, including exact picked-reference subsets, no click-point
+fallback, manual revalidation at Apply, Casework selection, native Activate View posting
+without opening a model-view tab, and above/left placement. All 36 runtime sources compile
+in the installed IronPython 2.7 engine.
+
+Seven native Revit 2025 checks pass in the isolated QA runner. The additional cabinet test
+creates a real Casework family, selects seven original edge references in a section view,
+and reads back 1015 mm width plus 900 / 25 / 600 / 975 mm chain segments. Existing grid,
+wall, column, stale-preview and cancelled-review regressions still pass. QA edits are rolled
+back; the runner does not load the production model. Reference filtering was exercised with
+native references, not interactive mouse picking. The sheet activation/resume sequence and
+production viewport picking still need live UI verification; the user stopped Computer Use.
+EQ constraints, FFL markers, tags and material notes from the sample are not implemented.
+
+## Add Dimensions, 2026-10-30
+
+104 portable regressions pass; all 36 runtime Python files compile in the installed
+IronPython 2.7 engine. The new Sheet button creates reviewed linear dimensions from
+selected original host faces and straight-grid references in a placed model view.
+Tests cover rotated view axes, paper/model offset conversion, coincident planes,
+reference limits, skipped owners, stale geometry, atomic rollback and grid canonical IDs.
+
+Six native Revit 2025 checks pass through the pyRevit CLI on the isolated QA document:
+a three-grid chain with two actual ten-foot segments and a seventeen-foot view plane;
+repeated-dimension rejection; overall wall dimensions in both directions; a moved grid
+rejected after preview; original face references from two translated column-family
+instances; and the UI flow accepting native unwrapped picker values with zero writes
+on preview cancel. That last flow substitutes the pickers and PreviewWindow; it is not
+an interactive production-model Apply test. QA transactions were rolled back, and no
+production model was loaded by the batch runner.
+
+The initial native passes exposed missing datum view bounding boxes and annotation
+visibility filtering. Final placement can use the original grid curve; existing dimensions
+are read with an owner-view filter and canonical grid-reference identities. Door/window
+host families, every family representation, dependent views, worksharing write denial,
+annotation-crop visibility, large selections and Revit 2024/2026 still need representative
+native validation. Only original planar-face and straight-grid anchors are supported;
+curved/oblique geometry, linked elements and guessed family reference planes are excluded.
+
 ## Ribbon organization, 2026-10-30
 
 Hamdan now contains exactly three panels, ordered Sheet, Model and QA. All twelve
