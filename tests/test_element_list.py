@@ -11,7 +11,7 @@ from hamdan_elements import ElementListState, describe_element
 
 class ElementListTests(unittest.TestCase):
     def window_class(self, namespace):
-        path = ROOT / 'Hamdan.tab/Elements.panel/Element List.pushbutton/script.py'
+        path = ROOT / 'Hamdan.tab/Model.panel/Element List.pushbutton/script.py'
         tree = ast.parse(path.read_text(encoding='utf-8'))
         node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'ElementWindow')
         node.bases = [ast.Name(id='object', ctx=ast.Load())]
@@ -72,7 +72,7 @@ class ElementListTests(unittest.TestCase):
         self.assertFalse(state.rows)
 
     def test_modeless_actions_schedule_api_work_and_do_not_transact(self):
-        path = ROOT / 'Hamdan.tab/Elements.panel/Element List.pushbutton/script.py'
+        path = ROOT / 'Hamdan.tab/Model.panel/Element List.pushbutton/script.py'
         tree = ast.parse(path.read_text(encoding='utf-8'))
         window = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'ElementWindow')
         handlers = {node.name: node for node in window.body if isinstance(node, ast.FunctionDef)}

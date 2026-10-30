@@ -11,7 +11,7 @@ from hamdan_numbering import plan_numbers, find_conflicts, apply_assignments
 from hamdan_elements import collect_rooms, safe_name
 from test_issue_review import AUDIT, extract_functions
 
-FORMATTER = ROOT / 'Hamdan.tab/Sheets.panel/Prefix Sheet Numbers.pushbutton/script.py'
+FORMATTER = ROOT / 'Hamdan.tab/Sheet.panel/Prefix Sheet Numbers.pushbutton/script.py'
 
 
 class NumberFormatterTests(unittest.TestCase):

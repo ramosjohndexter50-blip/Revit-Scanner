@@ -1,5 +1,14 @@
 # Verification boundary
 
+## Ribbon organization, 2026-10-30
+
+Hamdan now contains exactly three panels, ordered Sheet, Model and QA. All twelve
+commands appear once with their script, bundle metadata and icon present. Command
+files retain their previous contents; only parent locations and panel ordering change.
+The 92 portable regressions pass using the new paths, and all seven WPF layouts load.
+The installed ribbon files are synchronized; displaying the new panels requires a
+pyRevit reload. No Revit model edits or live audit were performed for this layout change.
+
 ## Custom duplicate checks removed, 2026-10-28
 
 92 portable regressions pass. The scan no longer runs geometry/location duplicate

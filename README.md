@@ -27,7 +27,20 @@ The audit is read-only: it creates reports but never adds, edits, or deletes Rev
 
 3. Leave the install path at pyRevit's default, then choose **Add and install**.
 4. Reload pyRevit or restart Revit.
-5. Open **Hamdan > Audit > Run Audit**.
+5. Open **Hamdan > QA > Run Audit**.
+
+## Ribbon groups
+
+All commands are in the **Hamdan** tab, arranged from left to right:
+
+| Group | Tools |
+| --- | --- |
+| Sheet | Sheet Manager, Create Sheets, Number Formatter, Sheet Layout, Sheet Audit |
+| Model | Element List, Batch Parameters, Dimensions & Tags |
+| QA | Run Audit, Review Issues, Open Dashboard, BEP Profiles |
+
+Number Formatter still supports both sheets and rooms. Dimensions & Tags includes
+its existing scan and edit options. Moving commands does not change their scope.
 
 ## Reports and configuration
 
@@ -78,7 +91,7 @@ It also writes `audit_config.json` there. Edit that file to adjust hard-clash ca
 
 ## Review and locate findings
 
-Run **Hamdan > Audit > Run Audit** once after updating. Then open **Review Issues**.
+Run **Hamdan > QA > Run Audit** once after updating. Then open **Review Issues**.
 Select a row to read its suggested fix in the details panel, or search for a severity,
 level, description, or Element ID. Click **Select & Zoom** to close the picker and
 locate the issue in Revit. A view or sheet finding opens that view directly.
@@ -91,7 +104,7 @@ changes only selection and the active view, with no edits to model geometry or p
 
 ## Live Element List
 
-Open **Hamdan > Elements > Element List** and leave the window open. Clicking
+Open **Hamdan > Model > Element List** and leave the window open. Clicking
 elements in Revit adds named rows automatically: family, type, category, level,
 and Element ID. A window such as `W-Aluminum_Fixed_Exterior` is shown with its
 type, for example `1200 x 3180`. Repeated clicks update the same row instead of
@@ -112,7 +125,7 @@ included in Review Issues and the next generated HTML audit report.
 
 ## Custom sheet and room numbering
 
-Open **Hamdan > Sheets > Number Formatter** (replaces the old Prefix Sheet Numbers
+Open **Hamdan > Sheet > Number Formatter** (replaces the old Prefix Sheet Numbers
 label). Choose **Sheets** or **Rooms**, select the items to number, then edit the
 pattern in the live preview:
 
@@ -137,7 +150,7 @@ restrictions on the generated text when applying the numbers.
 
 ## Create sheets
 
-Open **Hamdan > Sheets > Create Sheets**. Choose a loaded title-block type (or **No title block**),
+Open **Hamdan > Sheet > Create Sheets**. Choose a loaded title-block type (or **No title block**),
 count, start, increment, floor/tower codes and patterns for numbers and names. For example,
 number `{floor}{tower}-{n:02}`, name `General Arrangement {n:02}`, start `3` creates `GA-03`.
 Use `{n:02}-{floor}{tower}` for number-first output. The preview blocks duplicate numbers
@@ -147,33 +160,33 @@ The batch limit is 500 sheets; it does not place views automatically.
 
 ## Productivity and document checks (3.1)
 
-- **Sheets > Sheet Manager:** filter the sheet table, tick Use, edit Number/Name,
+- **Sheet > Sheet Manager:** filter the sheet table, tick Use, edit Number/Name,
   additional revision IDs and one optional sheet text parameter. Review changes lists
   every old/new value before Apply. Sheet-number swaps are supported. Additional
   revisions do not remove cloud-driven revisions or edit project revision definitions.
-- **Elements > Batch Parameters:** choose current selection, active view or whole model,
+- **Model > Batch Parameters:** choose current selection, active view or whole model,
   then categories, instance/type scope and an exact parameter identity. Optional prefill
   sets a common proposed value. Select rows and review before Apply. Type edits affect
   every instance of that type. Double values use project display units; integers require
   whole numbers (Yes/No uses 1/0). Element-reference parameters are excluded. Use Sheet
   Manager for sheet Number/Name. Read-only/missing targets are counted and excluded.
-- **Audit > Dimensions & Tags:** choose host views. Checks direct/segment dimension
+- **Model > Dimensions & Tags:** choose host views. Checks direct/segment dimension
   ValueOverride, orphaned IndependentTags and missing local independent tags for the
   configured categories. Default required-tag categories: Doors and Windows. Missing
   tags are BEP review candidates; the view collector is not proof that a tag is required.
   Linked tags and room/space tags are outside this check. This tool does not infer
   which geometry needs dimensions.
-- **Sheets > Sheet Layout:** choose sheets. Tests viewport/schedule rectangles against
+- **Sheet > Sheet Layout:** choose sheets. Tests viewport/schedule rectangles against
   a unique title-block bounding rectangle, pairwise layout overlap candidates and
   required title-block information. Includes schedules, excludes revision schedules and
   viewport labels. No/ambiguous title-block bounds leave outside-sheet coverage
   incomplete. Intended overlay views and family bounds need visual review.
-- **Settings > BEP Profiles:** save, edit JSON, import/export and activate named profiles
+- **QA > BEP Profiles:** save, edit JSON, import/export and activate named profiles
   per model. Profiles own each supplied section; an empty section deliberately disables
   its rules. Invalid profiles stop the scan rather than silently applying defaults. A
   shared profile edit affects all models that use it. The profile name and full rule
   signature are saved with the scan for traceability. Each new scan starts fresh.
-- **Audit > Review Issues:** select/zoom, edit workflow status, assignee, due date,
+- **QA > Review Issues:** select/zoom, edit workflow status, assignee, due date,
   comment and approval/resolution reason, or open the current issue dashboard. Only the current scan is shown; document checks replace the prior model-audit result.
   Tracking is local JSON scoped to that scan;
   it does not message assignees. Workflow edits record user/time and reject stale changes within that scan.
@@ -195,7 +208,7 @@ skipped geometry events and loaded links whose documents cannot be read.
 
 ## Dimension and tag editing (3.2)
 
-Open **Hamdan > Audit > Dimensions & Tags**. The first menu keeps **Scan dimensions & tags**
+Open **Hamdan > Model > Dimensions & Tags**. The first menu keeps **Scan dimensions & tags**
 and adds three edit actions. Scope can be current selection, active view or chosen views.
 The table supports search, **Select all shown**, per-row Use, and exact old/new preview.
 Only changed Use rows are committed after **Review changes > Apply changes**.

@@ -1,5 +1,4 @@
 layout:
-  - Audit
-  - Sheets
-  - Elements
-  - Settings
+  - Sheet
+  - Model
+  - QA

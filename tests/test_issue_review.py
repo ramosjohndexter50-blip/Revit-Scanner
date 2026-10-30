@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'lib'))
 from hamdan_issues import attach_references, build_issues, identity_matches, latest_model_report
 
-AUDIT = ROOT / 'Hamdan.tab/Audit.panel/Model Health & Clash Audit.pushbutton/script.py'
-REVIEW = ROOT / 'Hamdan.tab/Audit.panel/Review Issues.pushbutton/script.py'
+AUDIT = ROOT / 'Hamdan.tab/QA.panel/Model Health & Clash Audit.pushbutton/script.py'
+REVIEW = ROOT / 'Hamdan.tab/QA.panel/Review Issues.pushbutton/script.py'
 
 
 def extract_functions(path, names, namespace):
